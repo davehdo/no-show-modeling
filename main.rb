@@ -12,7 +12,7 @@ require "./reports.rb"
 
 # =============================================================================
 # ==========================  load the billing data  ==========================
-input_file = "neurologyvisits-2017-05-includes-cancelled.csv"
+input_file = "neurologyvisitsjuly2014-november2017.csv"
 # provider_groupings_filename = "provider_groupings.csv"
 # assistant_provider_groupings_filename = "assistant_provider_groupings.csv"
 # stats_outpatient_filename = "stats_outpatient_divisions.yml"
@@ -99,8 +99,10 @@ def extract_clinic_sessions( encounters )
     timeslots_completed = encounters_in_session.status_completed.collect {|e| e["timeslots"] }.flatten.uniq
     timeslots_no_show = encounters_in_session.status_no_show.collect {|e| e["timeslots"] }.flatten.uniq
     timeslots_cancelled = encounters_in_session.status_cancelled.collect {|e| e["timeslots"] }.flatten.uniq
-    timeslots_other = encounters_in_session.collect {|e| e["timeslots"] }.flatten.uniq - timeslots_completed - timeslots_no_show - timeslots_cancelled
-
+    timeslots_scheduled = encounters_in_session.status_scheduled.collect {|e| e["timeslots"] }.flatten.uniq
+    timeslots_other = encounters_in_session.collect {|e| e["timeslots"] }.flatten.uniq - 
+    timeslots_scheduled - timeslots_completed - timeslots_no_show - timeslots_cancelled
+      
     visual = timeslots.collect {|timeslot|
       if timeslots_completed.include?( timeslot )
         "." # completed
@@ -108,6 +110,8 @@ def extract_clinic_sessions( encounters )
         "X" # no show
       elsif timeslots_cancelled.include?( timeslot )
         "O" # cancellation, not filled
+      elsif timeslots_scheduled.include?( timeslot )
+        "^"
       elsif timeslots_other.include?( timeslot )
         "?" # other
       else
@@ -123,9 +127,10 @@ def extract_clinic_sessions( encounters )
       date: Date.parse( parts[1] ),
       am_pm: parts[2],
       encounters: encounters_in_session,
-      hours_booked: (encounters_in_session.status_completed + encounters_in_session.status_no_show).sum_minutes / 60.0,
+      hours_booked: (encounters_in_session.status_completed + encounters_in_session.status_no_show + encounters_in_session.status_scheduled).sum_minutes / 60.0,
       hours_completed: (encounters_in_session.status_completed ).sum_minutes / 60.0,
-      is_full_session: (encounters_in_session.status_completed + encounters_in_session.status_no_show).sum_minutes > 120,
+      is_full_session: (encounters_in_session.status_completed + encounters_in_session.status_no_show + encounters_in_session.status_scheduled).sum_minutes >= 120,
+      is_future_session: (encounters_in_session.status_scheduled ).sum_minutes >= 30,
       visual: visual,
     }
   }
@@ -133,7 +138,7 @@ end
 
 
 selected_entries = @encounters_all.select {|e| e["Provider"] == "RUBENSTEIN, MICHAEL NEIL"}
-  .select {|e| e["appt_at"] > DateTime.new(2016, 1, 1) and e["appt_at"] < DateTime.new(2016, 7, 1)}
+  .select {|e| e["appt_at"] > DateTime.new(2016, 7, 1) and e["appt_at"] < DateTime.new(2017, 7, 1)}
   .sort_by {|e| e["appt_at"]}
 
 

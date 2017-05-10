@@ -109,52 +109,115 @@ Report dates: #{ data_date_range }
 ============================== Summary Report =================================
 
 1. Clinic Sessions
+Complete sessions are defined as 2 hours or more of patients booked
 
 #{
-  print_table([["Month", "Complete sessions", "Partial sessions", "Scheduled sessions"]] +
+  print_table([["Month", "Complete sessions", "Partial sessions", "Scheduled sessions" ]] +
   clinic_sessions.group_by {|e| e[:date].strftime("%m/%Y")}.collect {|month, entries_for_month|
       # complete_sessions
       # partial_sessions
       # scheduled_sessions
-      [month, entries_for_month.count {|e| e[:is_full_session]}, entries_for_month.count {|e| !e[:is_full_session]}, 1]
-  })
+      [month, 
+        entries_for_month.count {|e| e[:is_full_session] and !e[:is_future_session]}, 
+        entries_for_month.count {|e| !e[:is_full_session] and !e[:is_future_session]}, 
+        entries_for_month.count {|e| e[:is_future_session]}, 
+      ]
+  } + [[
+    "SUM",
+    clinic_sessions.count {|e| e[:is_full_session] and !e[:is_future_session]}, 
+    clinic_sessions.count {|e| !e[:is_full_session] and !e[:is_future_session]}, 
+    clinic_sessions.count {|e| e[:is_future_session]}, 
+  ]])
 }
 
-Jul	5 sessions
-Aug	5 sessions
-Sep	5 sessions (15 YTD; Goal 43 sessions)
-----
-Oct 	7 sessions scheduled
-Nov 	7 sessions scheduled
-Dec 	7 sessions scheduled
 ---
-Projected entire FY 2017: 134 sessions (Goal 138 sessions)
+Projected entire FY 2017: *** sessions (Goal *** sessions)
 
-% Slots booked (as of 8am the day before)
-Jul 	85% 
-Aug 	75%
-Sep 	80% (YTD 83%; dept average: 70%)
-___
-Oct 	80%
-Nov	65%
-Dec	60%
 
-% Patients arrived (given they were booked as of 8am the day before)
-Jul  	65% 
-Aug  	65%
-Sep	65% (YTD 65%; dept average: 70%)
+2. % Slots booked 
+Defined as completed visits plus no-shows, divided by four hours per session
 
-Clinic RVUs
-Jul	35 RVUs
-Aug	25 RVUs
-Sep	35 RVUs (95 YTD; Goal 143 RVUs)
+A histogram of how heavily booked each session is
+#{
+  print_table([["Hrs", "n prior sessions", "n future sessions" ]] +
+    clinic_sessions.group_by {|e| e[:hours_booked] }.sort_by {|k,v| k}.select {|k,v| k > 0}.collect {|hours, entries|
+      [hours, 
+        "#{ entries.past_sessions.size.to_s.ljust(4, " ") } #{ "x" * entries.past_sessions.size }" ,
+        entries.future_sessions.size
+        
+      ]
+    }
+ )
+}
+
+
+% Booking amongst the complete sessions (i.e. ignores sessions with <2hrs of patients)
+Cancellation does not count as a booked patient
+
+#{
+  print_table([["Month", "% booked" ]] +
+  clinic_sessions.group_by {|e| e[:date].strftime("%m/%Y")}.collect {|month, entries_for_month|
+      # complete_sessions
+      # partial_sessions
+      # scheduled_sessions
+      complete_sessions = entries_for_month.select {|e| e[:is_full_session]}  
+      percent_booked_of_complete_sessions = complete_sessions.any? ? (complete_sessions.collect {|e| e[:hours_booked]}.compact.sum / ( complete_sessions.size * 4.0)) : nil
+      [month, 
+        self.progressbar( percent_booked_of_complete_sessions), 
+      ]
+  } 
+  )
+}
+
+Overall  #{
+  complete_sessions = clinic_sessions.select {|e| e[:is_full_session] and !e[:is_future_session]}  
+  percent_booked_of_complete_sessions = complete_sessions.any? ? (complete_sessions.collect {|e| e[:hours_booked]}.compact.sum / ( complete_sessions.size * 4.0)) : nil
+  
+   
+  self.progressbar( percent_booked_of_complete_sessions)
+}
+* booking rate for past sessions only (omits future sesions)
+
+
+3. Percent of cancelled slots with a rebooking
+***
+
+
+4. Show rate (% Patients arrived, given booked)
+#{
+  print_table([["Month", "% booked" ]] +
+  clinic_sessions.group_by {|e| e[:date].strftime("%m/%Y")}.collect {|month, sessions_for_month|
+      encounters_for_month = sessions_for_month.collect {|e| e[:encounters]}.flatten
+      
+      n_show = encounters_for_month.status_completed.size
+      n_booked = encounters_for_month.status_no_show.size + n_show
+      [month, 
+        self.progressbar( 1.0 * n_show / n_booked ), 
+      ]
+  } 
+  )
+}
+
+Overall  #{
+      encounters_for_month = clinic_sessions.collect {|e| e[:encounters]}.flatten
+    
+      n_show = encounters_for_month.status_completed.size
+      n_booked = encounters_for_month.status_no_show.size + n_show
+
+      self.progressbar( 1.0 * n_show / n_booked )
+} 
+
+
+5. Clinic RVUs
+Jul	*** RVUs
+Aug	*** RVUs
+Sep	*** RVUs (*** YTD; Goal *** RVUs)
 ----
-Oct 	expected 14 RVUs (assuming same booking rate, same show rate)
-Nov 	expected 14 RVUs
-Dec 	expected 14 RVUs
+Oct 	expected *** RVUs (assuming same booking rate, same show rate)
+Nov 	expected *** RVUs
+Dec 	expected *** RVUs
 ---
-Projected entire FY 2017: 1324 RVUs (Goal 2342 RVUs)
-
+Projected entire FY 2017: *** RVUs (Goal *** RVUs)
 
 
 """
