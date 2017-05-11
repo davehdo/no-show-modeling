@@ -102,21 +102,19 @@ class Reports
     
 """
 Sessions Report
-Name:
-Report dates: #{ data_date_range }
+Provider(s): #{ selected_entries.providers.uniq.join(" / ") }
+Report dates: #{ data_date_range.min.strftime("%F") } - #{ data_date_range.max.strftime("%F") }
 
 ===============================================================================
 ============================== Summary Report =================================
 
 1. Clinic Sessions
-Complete sessions are defined as 2 hours or more of patients booked
+- Helps determine if you are on track
+- Full sessions are defined as half-days with 2 or more hours of patients booked
 
 #{
-  print_table([["Month", "Complete sessions", "Partial sessions", "Scheduled sessions" ]] +
+  print_table([["Month", "Full sessions", "Partial sessions", "Scheduled sessions" ]] +
   clinic_sessions.group_by {|e| e[:date].strftime("%m/%Y")}.collect {|month, entries_for_month|
-      # complete_sessions
-      # partial_sessions
-      # scheduled_sessions
       [month, 
         entries_for_month.count {|e| e[:is_full_session] and !e[:is_future_session]}, 
         entries_for_month.count {|e| !e[:is_full_session] and !e[:is_future_session]}, 
@@ -124,68 +122,107 @@ Complete sessions are defined as 2 hours or more of patients booked
       ]
   } + [[
     "SUM",
-    clinic_sessions.count {|e| e[:is_full_session] and !e[:is_future_session]}, 
-    clinic_sessions.count {|e| !e[:is_full_session] and !e[:is_future_session]}, 
-    clinic_sessions.count {|e| e[:is_future_session]}, 
+    n_completed = clinic_sessions.count {|e| e[:is_full_session] and !e[:is_future_session]}, 
+    n_partial = clinic_sessions.count {|e| !e[:is_full_session] and !e[:is_future_session]}, 
+    n_scheduled = clinic_sessions.count {|e| e[:is_future_session]}, 
   ]])
 }
 
 ---
-Projected entire FY 2017: *** sessions (Goal *** sessions)
+Projected entire FY 2017: #{n_completed + n_scheduled} sessions (Goal *** sessions)
 
 
-2. % Slots booked 
-Defined as completed visits plus no-shows, divided by four hours per session
-
-A histogram of how heavily booked each session is
+2. Hours of patients booked for each clinic session
+- Booked refers to completed visits, no-shows, and scheduled visits
+- Over 4 hours represents overbooking
+- This may be thrown off by EMG and Botox sessions, because each patient is 
+  listed for 15 minute slot
 #{
-  print_table([["Hrs", "n prior sessions", "n future sessions" ]] +
+  print_table([["Hrs", "historic", "future" ]] +
     clinic_sessions.group_by {|e| e[:hours_booked] }.sort_by {|k,v| k}.select {|k,v| k > 0}.collect {|hours, entries|
       [hours, 
-        "#{ entries.past_sessions.size.to_s.ljust(4, " ") } #{ "x" * entries.past_sessions.size }" ,
-        entries.future_sessions.size
-        
+        "|#{ self.progressbar( 1.0 * entries.past_sessions.size / clinic_sessions.size ) } (#{ entries.past_sessions.size })",
+        "|#{ self.progressbar( 1.0 * entries.future_sessions.size / clinic_sessions.size) } (#{ entries.future_sessions.size })",        
       ]
     }
  )
 }
 
 
-% Booking amongst the complete sessions (i.e. ignores sessions with <2hrs of patients)
-Cancellation does not count as a booked patient
-
+3. Percent of timeslots booked, amongst full sessions 
+- Full sessions are defined as half-days with 2 or more hours of patients booked
+- 100% booking is defined as 4 hours of patient care
+- Omits sessions with <2hrs of patients
+- Cancellation does not count as a booked patient, even though late cancellations are 
+  practically like no-shows
+- Method 1 counts the total minute-value of encounters where status is complete or 
+  no-show, thus is susceptible to error if there are duplicate encounters, which 
+  occurs in procedures
+- Method 2 counts percentage of 15-minute timeslots that are filled, therefore 
+  cannot exceed 100% and does not give credit for doublebooked patients
+ 
 #{
-  print_table([["Month", "% booked" ]] +
-  clinic_sessions.group_by {|e| e[:date].strftime("%m/%Y")}.collect {|month, entries_for_month|
-      # complete_sessions
-      # partial_sessions
-      # scheduled_sessions
-      complete_sessions = entries_for_month.select {|e| e[:is_full_session]}  
-      percent_booked_of_complete_sessions = complete_sessions.any? ? (complete_sessions.collect {|e| e[:hours_booked]}.compact.sum / ( complete_sessions.size * 4.0)) : nil
+  complete_sessions = clinic_sessions.select {|e| e[:is_full_session] and !e[:is_future_session]}  
+  
+  print_table([["Month", "% booked (method 1)", "% booked (method 2)" ]] +
+  clinic_sessions.group_by {|e| e[:date].strftime("%m/%Y")}.collect {|month, full_sessions_for_month|
+
+      num = full_sessions_for_month.collect {|e| e[:hours_booked]}.compact.sum
+      num2 = full_sessions_for_month.collect {|e| e[:visual].count(".") + e[:visual].count("X")}.compact.sum * 0.25 # hours
+      denom = full_sessions_for_month.size * 4.0
+
       [month, 
-        self.progressbar( percent_booked_of_complete_sessions), 
+        self.progressbar( num / denom), 
+        self.progressbar( num2 / denom), 
       ]
   } 
   )
 }
 
 Overall  #{
-  complete_sessions = clinic_sessions.select {|e| e[:is_full_session] and !e[:is_future_session]}  
-  percent_booked_of_complete_sessions = complete_sessions.any? ? (complete_sessions.collect {|e| e[:hours_booked]}.compact.sum / ( complete_sessions.size * 4.0)) : nil
+  num = complete_sessions.collect {|e| e[:hours_booked]}.compact.sum
+  denom = complete_sessions.size * 4.0
   
-   
-  self.progressbar( percent_booked_of_complete_sessions)
+  self.progressbar( num / denom)
 }
-* booking rate for past sessions only (omits future sesions)
 
 
-3. Percent of cancelled slots with a rebooking
-***
 
+4. Cancelation with no rebooking, amongst full sessions
+- A fraction of the unbooked appointment slots used to have appointment until 
+  cancelled. 
+- Because this only includes full sessions, it takes into account that 
+  occasionally, entire clinic sessions are cancelled by provider.
 
-4. Show rate (% Patients arrived, given booked)
 #{
-  print_table([["Month", "% booked" ]] +
+  complete_sessions = clinic_sessions.select {|e| e[:is_full_session] and !e[:is_future_session]}  
+
+  print_table([["Month", "Hours", "% of clinic time" ]] +
+  clinic_sessions.group_by {|e| e[:date].strftime("%m/%Y")}.collect {|month, full_sessions_for_month|
+
+      # count the number of Os which are each 15 min of cancellation-not-rebooked
+      num = full_sessions_for_month.collect {|e| e[:visual].count("O")}.compact.sum * 0.25 # hours
+      denom = full_sessions_for_month.size * 4.0 # hours
+
+      [month, 
+        num,
+        self.progressbar( (num / denom)), 
+      ]
+  } 
+  )
+}
+
+Overall  #{
+  num = complete_sessions.collect {|e| e[:visual].count("O")}.compact.sum * 0.25 # hours
+  denom = complete_sessions.size * 4.0 # hours
+   
+  self.progressbar( num / denom)
+}
+
+
+5. Show rate (% Patients arrived, given booked)
+#{
+  print_table([["Month", "% showed" ]] +
   clinic_sessions.group_by {|e| e[:date].strftime("%m/%Y")}.collect {|month, sessions_for_month|
       encounters_for_month = sessions_for_month.collect {|e| e[:encounters]}.flatten
       
@@ -221,94 +258,7 @@ Projected entire FY 2017: *** RVUs (Goal *** RVUs)
 
 
 """
-    #
-#
-# 1. All encounters and procedures
-# #{ print_table( [["MONTH", "n", "RVU", "PAYMTS"]] + entries_by_month.collect {|m,e| [
-#   m,
-#   (e - e.procedure_injection).sum_quantity,
-#   e.sum_rvus,
-#   "$#{ e.sum_payments }"
-# ]})}
-# * n excludes injections, however RVU includes injections
-#
-# Pct contribution to total payments
-# Outpatient |#{ denom = entries_all.sum_payments;
-#               progressbar( 1.0 * entries_all.outpatient.sum_payments / denom )}
-# Inpatient  |#{ progressbar( 1.0 * entries_all.inpatient.sum_payments / denom )}
-# Procedure  |#{ progressbar( 1.0 * entries_all.procedure.sum_payments / denom )}
-#
-#
-# #{
-#   has_codes = Hash[entries_all.positive_quantity.collect {|e| [e["PROC_CODE"], e["PROC_NAME"]] }.uniq]
-#   codes_missing_rvus = has_codes.keys - Filters.rvu_map.keys
-#
-#   rows = codes_missing_rvus.collect {|e| "#{e}  #{has_codes[e]}"}
-#
-#   if rows.any?
-#     (["Warning: RVUs counts may underestimate due to missing values for:"] + rows).join("\n")
-#   else
-#     nil
-#   end
-# }
-#
-#
-# ===============================================================================
-# ============================= Outpatient Report ===============================
-#
-# 1. All Outpatient Encounters
-# #{ print_table( [["MONTH", "n", "RVU", "PAYMTS"]] + entries_by_month.collect {|m,e| [
-#   m,
-#   e.outpatient.sum_quantity,
-#   e.outpatient.sum_rvus,
-#   "$#{ e.outpatient.sum_payments }"
-# ]})}
-#
-#
-# 2. Pct of outpatient encounters that are initial (as opposed to followup)
-# Benchmk|#{ benchmark( benchmark_stats[:outpt_frac_encounters_that_are_initial] ) } Division average, std dev
-# #{ entries_by_month.collect { |m,e|
-#   n_fup = e.outpatient_follow.sum_quantity
-#   n_tot = e.outpatient.sum_quantity
-#   frac_init = (n_tot > 0) ? (1.0 * (n_tot - n_fup) / n_tot) : nil
-#
-#   "#{m.ljust(7, " ")}|#{ progressbar(frac_init)}" }.join("\n") }
-#
-#
-# 3. Pct Initial encounters billed as consult (as opposed to new)
-# Benchmk|#{ benchmark( benchmark_stats[:outpt_frac_initial_that_are_consult] ) } Division average, std dev
-# #{ entries_by_month.collect { |m,e|
-#   n_new = e.outpatient_new.sum_quantity
-#   n_cs = e.outpatient_consult.sum_quantity
-#   frac_cs = (n_new + n_cs > 0) ? (1.0 * (n_cs) / (n_new + n_cs)) : nil
-#
-#   "#{m.ljust(7, " ")}|#{ progressbar(frac_cs)}" }.join("\n") }
-#
-#
-# 4. Pct all outpatient encounters billed, by level:
-# (Includes all types of outpatient encounters: consult, new, followup)
-#
-# #{ print_table(
-#   [
-#     ["Date", "n", "Level 4 & above", "Level 5"],
-#     ["Benchmk", "-", "|#{ benchmark( benchmark_stats[:outpt_frac_level_4_and_up], true, 20 )}", "|#{ benchmark( benchmark_stats[:outpt_frac_level_5], true, 20)}"]
-#   ] +
-#   entries_by_month.collect { |m,e|
-#   init = e.outpatient
-#   l3 = init.level_3.sum_quantity
-#   l4 = init.level_4.sum_quantity
-#   l5 = init.level_5.sum_quantity
-#
-#   n_init = init.sum_quantity
-#
-#   [
-#     m,
-#     n_init,
-#     n_init >= 5 ? "|#{progressbar(1.0 * (l4 + l5) / n_init, true, 20) }" : "| small sample",
-#     n_init >= 5 ? "|#{progressbar(1.0 * l5 / n_init, true, 20) }" : "| small sample"
-#   ]
-# }
-# )
-# }
+
+
   end
 end

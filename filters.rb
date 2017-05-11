@@ -51,13 +51,24 @@ module Filters
     def past_sessions
       self.select {|e| !e[:is_future_session]}
     end   
-    # def status_completed
-    #   self.select {|e| e["Appt Status"] == "Completed"}
-    # end
-    #
-    # def status_completed
-    #   self.select {|e| e["Appt Status"] == "Completed"}
-    # end
+    
+    def providers
+      self.collect {|e| e["Provider"]}
+    end
+    
+    # "CSN":"95834500 " "Patient Name":"DOE,JOHN" "MRN":"012345589" "Age at Encounter":"60 " "Gender":"Male" "Ethnicity":"Non-Hispanic Non-Latino" "Race":"White" "Contact Date":" 01/16/2015" "Zip Code":"11111" "Appt. Booked on":"2014-10-17" "Appt. Time":" 01/16/2015  15:30 " "Checkin Time":" 01/16/2015  14:22 " "Appt Status":"Completed" "Referring Provider":"TORMENTI, MATTHEW J" "Department":"NEUROLOGY HUP" "Department ID":"378 " "Department Specialty":"Neurology" "Visit Type":"NEW PATIENT VISIT" "Procedure Category":"New Patient Visit" "Patient Class":"MAPS" "Provider":"RUBENSTEIN, MICHAEL NEIL" "Appt. Length":"60 " "Total Amount":"265.00"
+
+    # Visit Type
+    # ["NEW PATIENT VISIT", "RETURN PATIENT VISIT", "EMG", "PROCEDURE", "BOTOX INJECTION", "LUMBAR PUNCTURE", "RESEARCH", "RETURN PATIENT TELEMEDICINE", "NEW PATIENT SICK", "ALLIED HEALTH NON CHARGEABLE", "EEG ROUTINE", "LABORATORY", "ESTABLISHED PATIENT SPECIALTY", "NEW PATIENT TELEMEDICINE", "INDEPENDENT MEDICAL EXAM"]
+
+    # Procedure Category
+    # ["New Patient Visit", "Return Patient Visit", "Office Procedure", "Research", nil]
+
+    # Appt Status
+    # ["Completed", "Canceled", "No Show", "Left without seen", "Arrived", "Scheduled"]
+
+    # Patient Class
+    # ["MAPS", "Outpatient", nil, "Family Accounts", "OFFICE VISITS", "AM Admit"]
     
 
     #
