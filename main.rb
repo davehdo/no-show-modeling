@@ -17,6 +17,7 @@ stats_odds_ratios_filename = "stats_odds_ratios.csv"
 stats_odds_ratios_significant_filename = "stats_odds_ratios_significant.csv"
 provider_grouping_template_filename = "provider_groupings_template.csv"
 prediction_output_filename = "no_show_predictions.csv"
+validation_filename = "validation.csv"
 
 
 # =============================================================================
@@ -106,9 +107,10 @@ end
 # =============================================================================
 # ===========================   features analysis   ===========================
 # =====================  and calculation of odds ratios  ======================
-feature_statistics_array = Analyze.generate_odds_ratios_for_each_feature(@encounters_all.status_no_show, @encounters_all.status_completed)
-
-
+feature_statistics_array = Analyze.generate_odds_ratios_for_each_feature(
+  @encounters_all.status_no_show, 
+  @encounters_all.status_completed
+  )
 
 headers = feature_statistics_array[0].keys
 
@@ -139,8 +141,31 @@ log_odds_ratios_by_feature = Hash[significant_feature_statistics_array.collect {
 }
 
 
+# =============================================================================
+# =========================   validate the model   ============================
+squares = @encounters_all.status_no_show.collect {|e| (1.0 - e[:prob_no_show]) ** 2 } + 
+  @encounters_all.status_completed.collect {|e| (0.0 - e[:prob_no_show]) ** 2 }
 
+rms_error = Math.sqrt(squares.mean)
+puts "a validation was performed at RMS error of #{ rms_error }"
 
+# threshold_of_no_show = 1 - 0.74 # greater than
+
+# puts "with a threahold of #{ threshold_of_no_show }, the accuracy of prediction was #{ }"
+step_size = 0.025
+
+puts "Saving as --#{ validation_filename }--"
+CSV.open("#{ validation_filename }", "wb") do |csv|
+  csv << ["RMS error", rms_error]
+  csv << ["P(predicted no show) lower range", "P(actual no show)", "n show", "n no show"]
+  
+  (0.0..0.8).step( 0.025 ).each do |prob| 
+    n_no_show = @encounters_all.status_no_show.count {|e| ( prob...(prob + step_size) ).include? e[:prob_no_show] } 
+    n_show = @encounters_all.status_completed.count {|e| ( prob...(prob + step_size) ).include? e[:prob_no_show] } 
+    
+    csv << [prob, 1.0 * n_no_show / ( n_no_show + n_show ), n_no_show, n_show]
+  end
+end  
 
 # =============================================================================
 # ==============================   check data  ================================
@@ -163,26 +188,31 @@ log_odds_ratios_by_feature = Hash[significant_feature_statistics_array.collect {
 # ==========================   generate reports   =============================
 
 # puts Reports.sessions(selected_entries, clinic_sessions)
+def friendly_filename( input_string )
+  input_string.gsub(/[^0-9A-Za-z.\-]+/, '_').downcase
+end
+
 
 def generate_and_save_sessions_report( provider, encounters, custom_filename = nil) #
   raise "no entries" if encounters.size == 0
   puts "Producing report..."
-  # ==========================  generate a filename  ==========================
-  if custom_filename
-    provider_name_filesystem_friendly = custom_filename.gsub(/[^0-9A-Za-z.\-]+/, '_').downcase
-    filename_complete = "report_billing_#{provider_name_filesystem_friendly}_#{ Time.now.strftime("%F") }.txt"
-  else
-    provider_name_filesystem_friendly = provider.gsub(/[^0-9A-Za-z.\-]+/, '_').downcase
-    filename_complete = "report_billing_#{provider_name_filesystem_friendly}_#{ Time.now.strftime("%F") }.txt"
-  end
-
   clinic_sessions = Analyze.extract_clinic_sessions( encounters )
   
+  friendly = friendly_filename( custom_filename || provider )
+  filename_complete = "report_billing_#{friendly}_#{ Time.now.strftime("%F") }.txt"
+
   File.open(filename_complete , "w:UTF-8") do |file|
     file.write(Reports.sessions(encounters, clinic_sessions ).gsub("\n", "\r\n"))
   end
   puts "  Saved as #{ filename_complete }"
+  
+  filename_complete_2 = "report_prediction_#{friendly}_#{ Time.now.strftime("%F") }.txt"
 
+  File.open(filename_complete_2 , "w:UTF-8") do |file|
+    file.write(Reports.sessions_prediction(encounters, clinic_sessions ).gsub("\n", "\r\n"))
+  end
+  puts "  Saved as #{ filename_complete_2 }"
+  
 end
 
 
@@ -194,26 +224,14 @@ generate_and_save_sessions_report( "PRICE, RAYMOND", selected_entries)
 generate_and_save_sessions_report( "many providers", @encounters_all
   .select {|e| e["appt_at"] > DateTime.new(2016, 7, 1) and e["appt_at"] < DateTime.new(2017, 7, 1)})
 
-generate_and_save_sessions_report( "CHEN, MARIA FANG-CHUN", @encounters_all
-.select {|e| e["Provider"] == "CHEN, MARIA FANG-CHUN"}
+generate_and_save_sessions_report( "DO, DAVID", @encounters_all
+.select {|e| e["Provider"] == "DO, DAVID"}
 .select {|e| e["appt_at"] > DateTime.new(2016, 7, 1) and e["appt_at"] < DateTime.new(2017, 7, 1)})
 
 
 # =============================================================================
 # ==============================   output   ===================================
 
-
-clinic_sessions = Analyze.extract_clinic_sessions( selected_entries )
-
-clinic_sessions.each do |clinic_session|
-    puts "=== #{ clinic_session[:id] } / #{ clinic_session[:encounters].status_completed.sum_minutes } / #{ clinic_session[:hours_booked]} hb / #{ clinic_session[:visual] } / #{ (clinic_session[:visual].count(".") + clinic_session[:visual].count("X")) * 0.25}"
-
-    clinic_session[:encounters].group_by {|e| e["appt_at"].strftime("%H:%M") }.each do |time, entries_for_time|
-      entries_text = entries_for_time.collect {|e| "#{ e["Patient Name"]} #{ e["Visit Type"]} (#{ e["Appt Status"]} #{e["Appt. Length"]}) #{ e[:prob_no_show]}" }.join(" / ")
-      puts "    #{ time }  #{ entries_text } "
-    end
-
-end
 
 # =============================================================================
 # ==============================   output   ===================================

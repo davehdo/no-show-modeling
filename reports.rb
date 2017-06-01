@@ -84,7 +84,41 @@ class Reports
 
   end
   
+  
+  def self.sessions_prediction(selected_entries, clinic_sessions)
+    # clinic_sessions = Analyze.extract_clinic_sessions( selected_entries )
+    dates = selected_entries.collect {|e| e["appt_at"]}
+    data_date_range = dates.min..dates.max
+    
+    squares = selected_entries.status_no_show.collect {|e| (1.0 - e[:prob_no_show]) ** 2 } + 
+      selected_entries.status_completed.collect {|e| (0.0 - e[:prob_no_show]) ** 2 }
 
+    rms_error = Math.sqrt(squares.mean)
+
+    
+    
+"""No-show Prediction Report
+Provider(s): #{ selected_entries.providers.uniq.join(" / ") }
+Report dates: #{ data_date_range.min.strftime("%F") } - #{ data_date_range.max.strftime("%F") }
+
+Validation was performed at RMS error of #{ rms_error }
+
+#{
+
+    clinic_sessions.select {|e| e[:is_future_session]}.collect do |clinic_session|
+        "#{ clinic_session[:id] } / #{ clinic_session[:encounters].status_completed.sum_minutes } / #{ clinic_session[:hours_booked]} hb / #{ clinic_session[:visual] } / #{ (clinic_session[:visual].count(".") + clinic_session[:visual].count("X")) * 0.25}\n" +
+
+        clinic_session[:encounters].group_by {|e| e["appt_at"].strftime("%H:%M") }.collect do |time, entries_for_time|
+          entries_text = entries_for_time.collect {|e| "#{ e["Patient Name"]} #{ e["Visit Type"]} (#{ e["Appt Status"]} #{e["Appt. Length"]}) #{ "#{(e[:prob_no_show] * 100).round}%" if e["Appt Status"]=="Scheduled"}" }.join(" / ")
+          "    #{ time }  #{ entries_text }"
+        end.join("\n")
+
+    end.join("\n")
+}
+"""
+  end
+  
+  
   def self.sessions( selected_entries, clinic_sessions )
     # entries_by_month = entries_all.group_by {|e| e["POST_MONTH"]}.sort_by {|m, t| "#{m}"}
     dates = selected_entries.collect {|e| e["appt_at"]}
