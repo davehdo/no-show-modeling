@@ -21,6 +21,8 @@ rescue
 end
 # include Statsample
 
+a=[1,2,3,4].to_scale
+puts Statsample::Graph::Histogram.new(a).to_svg
 
 # =============================================================================
 # ===============================  parameters  ================================
@@ -137,6 +139,7 @@ encounters_by_mrn = @encounters_all.group_by {|e| e["MRN"]}
 
 # =============================================================================
 # ===========================   features analysis   ===========================
+# ===========================   training the model   ==========================
 # =====================  and calculation of odds ratios  ======================
 feature_statistics_array = Analyze.generate_odds_ratios_for_each_feature(
   @encounters_all.status_no_show, 
@@ -170,6 +173,7 @@ log_odds_ratios_by_feature = Hash[significant_feature_statistics_array.collect {
   posttest_odds = e[:odds_ratio_no_show] * pretest_odds 
   e[:prob_no_show] = posttest_odds / (1 + posttest_odds)
 }
+
 
 
 # =============================================================================
