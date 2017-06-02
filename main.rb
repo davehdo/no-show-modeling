@@ -2,12 +2,25 @@
 # Report is calling “Charges, Payments and Adjustments”
 # exported from business objects… (PROMIS)
 
+# use ruby 2.2.1
+recommend_ruby_version = "2.2.1"
+
+puts "Warning: Running ruby version #{  RUBY_VERSION }. (Recommend #{ recommend_ruby_version })" unless recommend_ruby_version ==  RUBY_VERSION
 
 require "csv"
 require "./filters.rb"
 require "./reports.rb"
 require "./analyze.rb"
 # require 'yaml'
+
+
+begin
+  require 'statsample'
+rescue
+  puts "cannot find statssample; run gem install statsample"
+end
+# include Statsample
+
 
 # =============================================================================
 # ===============================  parameters  ================================
@@ -64,7 +77,8 @@ end
 
   
 # =============================================================================
-# =========   fix timestamps and extract features for each encounter  =========
+# ============================   fix timestamps   =============================
+
 
 @encounters_all.each {|e| 
   e["appt_at"] = DateTime.strptime(e["Appt. Time"], ' %m/%d/%Y  %H:%M ')
@@ -83,8 +97,22 @@ end
     timeslot = e["appt_at"] + (interval / 24.0 / 60.0)
     "#{ e["Provider"]}|#{ timeslot.strftime("%F|%H:%M") }"  
   }
-  
+}
+
+
+# =============================================================================
+# ==================   extract features for each encounter   ==================
+encounters_by_mrn = @encounters_all.group_by {|e| e["MRN"]}
+
+
+@encounters_all.each {|e| 
   # features
+  prior_encounters_2_yrs = encounters_by_mrn[e["MRN"]].select {|f| f["appt_at"] > (e["appt_at"] - 730) and f["appt_at"] < e["appt_at"] }
+  
+  prior_encounters_show = prior_encounters_2_yrs.status_completed
+  prior_encounters_no_show = prior_encounters_2_yrs.status_no_show
+  prior_encounters_cancelled = prior_encounters_2_yrs.status_cancelled
+  
   zip = e["Zip Code"] ? e["Zip Code"][0..4].rjust(5, "0") : "absent"
   dist = distance_by_zip[ zip ]   # distance from hosp
 
@@ -97,7 +125,10 @@ end
    "appt_hour_#{ e["appt_at"].hour.to_s.rjust(2, "0") }" => 1,
    "appt_made_#{ e["appt_booked_on"] ? (2 ** Math.log((e["appt_at"] - e["appt_booked_on"] + 1).to_f, 2).round).to_s.rjust(3, "0") : "unknown_" }d_advance" => 1,
    "appt_type_#{ e["Visit Type"].downcase }" => 1,
-   "dept_#{ e["Department"].downcase.gsub(" ", "_") }" => 1
+   "dept_#{ e["Department"].downcase.gsub(" ", "_") }" => 1,
+   "prior_show_past_2yr_#{ prior_encounters_show.size.to_s.rjust(2, "0") }" => 1,
+   "prior_no_show_past_2yr_#{ prior_encounters_no_show.size.to_s.rjust(2, "0") }" => 1,
+   "prior_cancellations_past_2yr_#{ prior_encounters_cancelled.size.to_s.rjust(2, "0") }" => 1
   }
   
   puts "Warning: #{ e["Appt. Length"] } min appt but #{ e["timeslots"].size } timeslots (#{e["timeslots"]})" if (1.0 * e["Appt. Length"].to_i / timeslot_size).to_i != e["timeslots"].size
