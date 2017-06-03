@@ -142,25 +142,28 @@ encounters_by_mrn = @encounters_all.group_by {|e| e["MRN"]}
   dist = distance_by_zip[ zip ]   # distance from hosp
 
   # we do a sparse encoding -- anything not listed in features is assumed to be 0
+
+  # e["features"] = {
+  #   "zip_#{ zip }" => 1,
+  #   "prior_show_past_2yr_#{ prior_encounters_show.size.to_s.rjust(2, "0") }" => 1,
+  #   "prior_no_show_past_2yr_#{ prior_encounters_no_show.size.to_s.rjust(2, "0") }" => 1,
+  #   "prior_cancellations_past_2yr_#{ prior_encounters_cancelled.size.to_s.rjust(2, "0") }" => 1
+  # } #.select {|k,v| k!=nil and (v == 1 or v == true)}
   
   e["features"] = {
     "dist_#{ Analyze.categorize_continuous_variable_log(dist, 2, 4, 0, 1024) }_km" => 1,
     "age_decade_#{ Analyze.categorize_continuous_variable( e["Age at Encounter"].to_i, 10, 3, 10, 90)  }" => 1,
-    "zip_#{ zip }" => 1,
+    # "zip_#{ zip }" => 1,
     "gender_male" => e["Gender"].downcase == "male" ? 1 : 0,
     "appt_made_#{ Analyze.categorize_continuous_variable_log(e["appt_booked_on"] ? (e["appt_at"] - e["appt_booked_on"] + 1) : nil, 2, 4, 0, 256 )  }d_advance" => 1,
     "dept_#{ e["Department"].downcase.gsub(" ", "_") }" => 1,
     "appt_hour_#{ e["appt_at"].hour.to_s.rjust(2, "0") }" => 1,
     "appt_type_#{ e["Visit Type"].downcase }" => 1,
-    "prior_show_past_2yr_#{ prior_encounters_show.size.to_s.rjust(2, "0") }" => 1,
-    "prior_no_show_past_2yr_#{ prior_encounters_no_show.size.to_s.rjust(2, "0") }" => 1,
-    "prior_cancellations_past_2yr_#{ prior_encounters_cancelled.size.to_s.rjust(2, "0") }" => 1
-  } #.select {|k,v| k!=nil and (v == 1 or v == true)}
+    "prior_show_past_2yr" =>  prior_encounters_show.size,
+    "prior_no_show_past_2yr" => prior_encounters_no_show.size,
+    "prior_cancellations_past_2yr" => prior_encounters_cancelled.size
+  }.select {|k,v| v!=nil }
 
-  # {
-  #  # ,
-  # }
-  
   # remove the uncategorizables - because in training contributes to linear dependence
   # e["features"].delete("dist__km")
   # e["features"].delete("appt_made_d_advance")
@@ -189,29 +192,30 @@ test_no_show = all_no_show - training_no_show
 
 # ======================   method 1
 
-lr = Analyze.multiple_regression( training_no_show, training_show )
+lr_model = Analyze.train_multiple_regression( training_no_show, training_show )
 
-log_odds_ratios_by_feature = lr.coeffs
-
-# se = lr.coeffs_se
-puts lr.summary
+puts lr_model.summary
 
 # ======================   method 2
+#
+feature_statistics_array = Analyze.train_odds_ratios( training_no_show, training_show )
+  
 
-feature_statistics_array = Analyze.generate_odds_ratios_for_each_feature( training_no_show, training_show )
-  .select {|e| e[:or_80_ci_lower] > 1 or e[:or_80_ci_upper] < 1}
+headers = feature_statistics_array[0].keys
+
+puts "Saving as --#{ stats_odds_ratios_filename }--"
+CSV.open("#{ stats_odds_ratios_filename }", "wb") do |csv|
+  csv << headers
+  feature_statistics_array.each do |items|
+    csv << items.values
+  end
+end
 #
-# headers = feature_statistics_array[0].keys
-#
-# puts "Saving as --#{ stats_odds_ratios_filename }--"
-# CSV.open("#{ stats_odds_ratios_filename }", "wb") do |csv|
-#   csv << headers
-#   feature_statistics_array.each do |items|
-#     csv << items.values
-#   end
-# end
-#
-log_odds_ratios_by_feature_2 = Hash[feature_statistics_array.collect {|e| [e[:feature_name], e[:log_odds_ratio]] }]
+log_odds_ratios_by_feature_2 = Hash[
+  feature_statistics_array
+    .select {|e| e[:or_80_ci_lower] > 1 or e[:or_80_ci_upper] < 1}
+    .collect {|e| [e[:feature_name], e[:log_odds_ratio]] }
+]
 
 
 
@@ -220,18 +224,15 @@ log_odds_ratios_by_feature_2 = Hash[feature_statistics_array.collect {|e| [e[:fe
 
 rb=ReportBuilder.new
 
+puts "\nMethod: Baseline performance with a constant probability for all encounters"
+Analyze.assign_odds_ratios( @encounters_all, {}, :prob_no_show)
 
-Analyze.assign_probability_based_on_log_odds_hash( @encounters_all, {})
-
-squares = test_no_show.collect {|e| (1.0 - e[:prob_no_show]) ** 2 } + 
-  test_show.collect {|e| (0.0 - e[:prob_no_show]) ** 2 }
-
-rms_error = Math.sqrt(squares.mean)
-puts "  if we assign everyone the baseline probability, RMS error of #{ rms_error }"
+Analyze.validate_model( test_no_show, test_show, :prob_no_show)
 
 
 
-Analyze.assign_probability_based_on_log_odds_hash( @encounters_all, log_odds_ratios_by_feature)
+puts "\nMethod: Multiple regression"
+Analyze.assign_multiple_regression( @encounters_all, lr_model, :prob_no_show)
 
 a=@encounters_all.collect {|e| e[:prob_no_show]}.to_vector
 rb.add(Statsample::Graph::Histogram.new(a))
@@ -239,17 +240,12 @@ rb.add(Statsample::Graph::Histogram.new(a))
 b=all_no_show.collect {|e| e[:prob_no_show]}.to_vector
 rb.add(Statsample::Graph::Histogram.new(b))
 
-
-squares = test_no_show.collect {|e| (1.0 - e[:prob_no_show]) ** 2 } + 
-  test_show.collect {|e| (0.0 - e[:prob_no_show]) ** 2 }
-
-rms_error = Math.sqrt(squares.mean)
-puts "  Method 1: a validation was performed at RMS error of #{ rms_error }"
+Analyze.validate_model( test_no_show, test_show, :prob_no_show)
 
 
+puts "\nMethod: Simple odds ratios"
 
-
-Analyze.assign_probability_based_on_log_odds_hash( @encounters_all, log_odds_ratios_by_feature_2)
+Analyze.assign_odds_ratios( @encounters_all, log_odds_ratios_by_feature_2, :prob_no_show)
 
 a=@encounters_all.collect {|e| e[:prob_no_show]}.to_vector
 rb.add(Statsample::Graph::Histogram.new(a))
@@ -257,12 +253,9 @@ rb.add(Statsample::Graph::Histogram.new(a))
 a=all_no_show.collect {|e| e[:prob_no_show]}.to_vector
 rb.add(Statsample::Graph::Histogram.new(a))
 
+Analyze.validate_model( test_no_show, test_show, :prob_no_show)
 
-squares = test_no_show.collect {|e| (1.0 - e[:prob_no_show]) ** 2 } + 
-  test_show.collect {|e| (0.0 - e[:prob_no_show]) ** 2 }
 
-rms_error = Math.sqrt(squares.mean)
-puts "  Method 2: a validation was performed at RMS error of #{ rms_error }"
 
 
 rb.save_html('histogram.html')

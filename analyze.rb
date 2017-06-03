@@ -32,29 +32,60 @@ module Analyze
   end
   
   
-  def self.assign_probability_based_on_log_odds_hash( encounters_all, log_odds_ratios_by_feature)
-    
+  def self.assign_odds_ratios( encounters_all, log_odds_ratios_by_feature, outcome_stored_as)  
     puts "\nAssigning probabilities to encounters based on their features (#{ log_odds_ratios_by_feature.size } are meaningful)"
-    
 
     pretest_prob = 1.0 * encounters_all.status_no_show.size / ( encounters_all.status_no_show.size + encounters_all.status_completed.size)
-    
+  
     puts "  using a pretest probability of #{ pretest_prob }"
     encounters_all.each {|e| 
-      e[:log_odds_ratios_itemized] = e["features"].collect {|k,v|
-        [k, log_odds_ratios_by_feature[k]]
-      }
-  
-      sum_log_odds = e[:log_odds_ratios_itemized].collect {|f| f[1]}.compact.sum || 0.0
+
+      e[:log_odds_ratios_itemized] = e["features"].collect {|feature_name,val|
+        [feature_name, val, log_odds_ratios_by_feature[feature_name]]
+      }.select {|f| f[2] != nil and f[1] != nil}
+      sum_log_odds = e[:log_odds_ratios_itemized].collect {|f| 1.0 * f[1] * f[2]}.sum || 0.0
+      
       e[:odds_ratio_no_show] = Math.exp( sum_log_odds )
       pretest_odds = pretest_prob / (1 - pretest_prob)
       posttest_odds = e[:odds_ratio_no_show] * pretest_odds 
-      e[:prob_no_show] = posttest_odds / (1 + posttest_odds)
+      e[outcome_stored_as] = posttest_odds / (1 + posttest_odds)
     }
   end
 
 
-  def self.multiple_regression( encounters_no_show, encounters_completed )
+  
+  
+  def self.validate_model( test_no_show, test_show, outcome_stored_as)
+    squares = test_no_show.collect {|e| (1.0 - e[outcome_stored_as]) ** 2 } + 
+      test_show.collect {|e| (0.0 - e[outcome_stored_as]) ** 2 }
+
+    rms_error = Math.sqrt(squares.mean)
+    puts "  A validation was performed at RMS error of:  #{ rms_error }"
+    rms_error
+  end
+  
+  
+  def self.assign_multiple_regression( encounters_all, multiple_regression_model, outcome_stored_as)
+    # e.g. Equation=-1.411 + -0.018appt_hour_09 + 0.009appt_hour_10 + -0.139appt_hour_12 + -0.014appt_hour_13 + -0.088appt_hour_14 + 0.144appt_hour_15 + -0.057appt_type_botox injection + 0.264appt_type_procedure + 0.103appt_type_return patient visit + 0.379dept_neurodiagnostics_pmuc + -0.165dept_neurology_hup + -0.059dept_neurology_pah + 0.052dept_neurology_pmuc + 0.102dept_neurology_ppmc_305_medical_office_bldg + -0.168dept_neurology_south_pavilion + -0.000dist_km + -0.002prior_cancellations_past_2yr + 0.325prior_no_show_past_2yr + -0.078prior_show_past_2yr
+    
+    log_odds_ratios_by_feature = multiple_regression_model.coeffs
+    puts "  Assigning probabilities to encounters based on their features (#{ log_odds_ratios_by_feature.size } are meaningful)"
+        
+    # puts "  using a pretest probability of #{ pretest_prob }"
+    encounters_all.each {|e| 
+      e[:log_odds_ratios_itemized] = e["features"].collect {|feature_name,val|
+        [feature_name, val, log_odds_ratios_by_feature[feature_name]]
+      }.select {|f| f[2] != nil and f[1] != nil}
+  
+      sum_log_odds = (e[:log_odds_ratios_itemized].collect {|f| 1.0 * f[1] * f[2]}.sum || 0.0) + multiple_regression_model.constant
+
+      posttest_odds = Math.exp( sum_log_odds ) 
+      e[outcome_stored_as] = posttest_odds / (1 + posttest_odds)
+    }
+  end
+
+
+  def self.train_multiple_regression( encounters_no_show, encounters_completed )
     puts "Running multiple regression "
     features_for_no_show = encounters_no_show.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
     features_for_show = encounters_completed.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
@@ -75,8 +106,8 @@ module Analyze
       # as calcuated by an odds ratio.
       # This helps reduce the computational requirement for training
       # and reduces that chance that "Regressors are linearly dependent"
-      n_feature_and_show = (features_for_show[ feature_name ] || []).count {|k,v| v == 1}
-      n_feature_and_no_show = (features_for_no_show[ feature_name ] || []).count {|k,v| v == 1}
+      n_feature_and_show = (features_for_show[ feature_name ] || []).count {|k,v| v != 0}
+      n_feature_and_no_show = (features_for_no_show[ feature_name ] || []).count {|k,v| v != 0}
 
       a = n_feature_and_no_show # exposed, bad outcome
       c = n_no_show - n_feature_and_no_show # control, bad outcome
@@ -104,7 +135,7 @@ module Analyze
 
   
   
-  def self.generate_odds_ratios_for_each_feature( encounters_no_show, encounters_completed )
+  def self.train_odds_ratios( encounters_no_show, encounters_completed )
     features_for_no_show = encounters_no_show.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
     features_for_show = encounters_completed.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
 
