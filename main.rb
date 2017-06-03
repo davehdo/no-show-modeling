@@ -19,10 +19,31 @@ begin
 rescue
   puts "cannot find statssample; run gem install statsample"
 end
+
+# raise (1..100).each {|e| puts [e, Analyze.categorize_continuous_variable( e, 2, 4, 4 )].join(" -> ")}.inspect
+
 # include Statsample
 
-a=[1,2,3,4].to_scale
-puts Statsample::Graph::Histogram.new(a).to_svg
+# scatter plot example
+# a=[1,2,3,4].to_vector
+# b=[3,4,5,6].to_vector
+# rb=ReportBuilder.new
+# rb.add(Statsample::Graph::Scatterplot.new(a,b))
+# rb.save_html('scatter.html')
+
+# multiple regression example
+# a=1000.times.collect {rand}.to_vector(:scale)
+# b=1000.times.collect {rand}.to_vector(:scale)
+# c=1000.times.collect {rand}.to_vector(:scale)
+#
+# ds={'a'=>a,'b'=>b,'c'=>c}.to_dataset
+# puts a
+# # ds['y']=ds.collect{|row| row['a'] * 5  +  row['b'] * 3  +  row['c'] * 2  +  rand()}
+#
+# lr=Statsample::Regression.multiple(ds,'c')
+# puts lr.summary
+
+
 
 # =============================================================================
 # ===============================  parameters  ================================
@@ -76,12 +97,12 @@ CSV.open("#{ provider_grouping_template_filename }", "wb") do |csv|
     csv << [prov_name, e.size, nil, nil]
   end
 end  
-
+puts "  done"
   
 # =============================================================================
 # ============================   fix timestamps   =============================
 
-
+puts "Parsing timestamps"
 @encounters_all.each {|e| 
   e["appt_at"] = DateTime.strptime(e["Appt. Time"], ' %m/%d/%Y  %H:%M ')
   e["checkin_time_obj"] = DateTime.strptime(e["Checkin Time"], ' %m/%d/%Y  %H:%M ') if e["Checkin Time"]
@@ -99,13 +120,15 @@ end
     timeslot = e["appt_at"] + (interval / 24.0 / 60.0)
     "#{ e["Provider"]}|#{ timeslot.strftime("%F|%H:%M") }"  
   }
+  puts "  Warning: prov has #{ e["Appt. Length"] } min appt but our analysis uses #{ timeslot_size } min timeslots (#{e["timeslots"]})" if (1.0 * e["Appt. Length"].to_i / timeslot_size).to_i != e["timeslots"].size
+  
 }
-
+puts "  done"
 
 # =============================================================================
 # ==================   extract features for each encounter   ==================
+puts "Extracting features"
 encounters_by_mrn = @encounters_all.group_by {|e| e["MRN"]}
-
 
 @encounters_all.each {|e| 
   # features
@@ -119,75 +142,145 @@ encounters_by_mrn = @encounters_all.group_by {|e| e["MRN"]}
   dist = distance_by_zip[ zip ]   # distance from hosp
 
   # we do a sparse encoding -- anything not listed in features is assumed to be 0
-  e["features"] = {
-   "zip_#{ zip }" => 1,
-   "dist_#{ dist ? (2 ** Math.log(dist + 0.001, 2).round).to_f.round.to_s.rjust(4, "0") : "unknown"}_km" => 1,
-   "age_decade_#{ (e["Age at Encounter"].to_i / 10.0).round }" => 1, 
-   "gender_#{ e["Gender"].downcase }" => 1,
-   "appt_hour_#{ e["appt_at"].hour.to_s.rjust(2, "0") }" => 1,
-   "appt_made_#{ e["appt_booked_on"] ? (2 ** Math.log((e["appt_at"] - e["appt_booked_on"] + 1).to_f, 2).round).to_s.rjust(3, "0") : "unknown_" }d_advance" => 1,
-   "appt_type_#{ e["Visit Type"].downcase }" => 1,
-   "dept_#{ e["Department"].downcase.gsub(" ", "_") }" => 1,
-   "prior_show_past_2yr_#{ prior_encounters_show.size.to_s.rjust(2, "0") }" => 1,
-   "prior_no_show_past_2yr_#{ prior_encounters_no_show.size.to_s.rjust(2, "0") }" => 1,
-   "prior_cancellations_past_2yr_#{ prior_encounters_cancelled.size.to_s.rjust(2, "0") }" => 1
-  }
   
-  puts "Warning: #{ e["Appt. Length"] } min appt but #{ e["timeslots"].size } timeslots (#{e["timeslots"]})" if (1.0 * e["Appt. Length"].to_i / timeslot_size).to_i != e["timeslots"].size
-}
+  e["features"] = {
+    "dist_#{ Analyze.categorize_continuous_variable_log(dist, 2, 4, 0, 1024) }_km" => 1,
+    "age_decade_#{ Analyze.categorize_continuous_variable( e["Age at Encounter"].to_i, 10, 3, 10, 90)  }" => 1,
+    "zip_#{ zip }" => 1,
+    "gender_male" => e["Gender"].downcase == "male" ? 1 : 0,
+    "appt_made_#{ Analyze.categorize_continuous_variable_log(e["appt_booked_on"] ? (e["appt_at"] - e["appt_booked_on"] + 1) : nil, 2, 4, 0, 256 )  }d_advance" => 1,
+    "dept_#{ e["Department"].downcase.gsub(" ", "_") }" => 1,
+    "appt_hour_#{ e["appt_at"].hour.to_s.rjust(2, "0") }" => 1,
+    "appt_type_#{ e["Visit Type"].downcase }" => 1,
+    "prior_show_past_2yr_#{ prior_encounters_show.size.to_s.rjust(2, "0") }" => 1,
+    "prior_no_show_past_2yr_#{ prior_encounters_no_show.size.to_s.rjust(2, "0") }" => 1,
+    "prior_cancellations_past_2yr_#{ prior_encounters_cancelled.size.to_s.rjust(2, "0") }" => 1
+  } #.select {|k,v| k!=nil and (v == 1 or v == true)}
 
+  # {
+  #  # ,
+  # }
+  
+  # remove the uncategorizables - because in training contributes to linear dependence
+  # e["features"].delete("dist__km")
+  # e["features"].delete("appt_made_d_advance")
+  # e["features"].delete("appt_type_return patient telemedicine")
+  # e["features"].delete("appt_decade_50")
+  
+}
+puts "  done"
 
 # =============================================================================
 # ===========================   features analysis   ===========================
 # ===========================   training the model   ==========================
 # =====================  and calculation of odds ratios  ======================
-feature_statistics_array = Analyze.generate_odds_ratios_for_each_feature(
-  @encounters_all.status_no_show, 
-  @encounters_all.status_completed
-  )
 
-headers = feature_statistics_array[0].keys
+puts "Separating into training and test sets"
 
-puts "Saving as --#{ stats_odds_ratios_filename }--"
-CSV.open("#{ stats_odds_ratios_filename }", "wb") do |csv|
-  csv << headers
-  feature_statistics_array.each do |items| 
-    csv << items.values
-  end
-end  
+training_fraction = 0.25
+all_show = @encounters_all.status_completed
+all_no_show = @encounters_all.status_no_show
 
-significant_feature_statistics_array = feature_statistics_array.select {|e| e[:or_80_ci_lower] > 1 or e[:or_80_ci_upper] < 1}
-log_odds_ratios_by_feature = Hash[significant_feature_statistics_array.collect {|e| [e[:feature_name], e[:log_odds_ratio]] }]
+training_show = all_show.sample( (all_show.size * training_fraction).round)
+training_no_show = all_no_show.sample( (all_no_show.size * training_fraction).round)
+test_show = all_show - training_show
+test_no_show = all_no_show - training_no_show
+
+
+# ======================   method 1
+
+lr = Analyze.multiple_regression( training_no_show, training_show )
+
+log_odds_ratios_by_feature = lr.coeffs
+
+# se = lr.coeffs_se
+puts lr.summary
+
+# ======================   method 2
+
+feature_statistics_array = Analyze.generate_odds_ratios_for_each_feature( training_no_show, training_show )
+  .select {|e| e[:or_80_ci_lower] > 1 or e[:or_80_ci_upper] < 1}
+#
+# headers = feature_statistics_array[0].keys
+#
+# puts "Saving as --#{ stats_odds_ratios_filename }--"
+# CSV.open("#{ stats_odds_ratios_filename }", "wb") do |csv|
+#   csv << headers
+#   feature_statistics_array.each do |items|
+#     csv << items.values
+#   end
+# end
+#
+log_odds_ratios_by_feature_2 = Hash[feature_statistics_array.collect {|e| [e[:feature_name], e[:log_odds_ratio]] }]
+
 
 
 # =============================================================================
 # ==============  assign each encounter a probability of no-show  =============
-@encounters_all.each {|e| 
-  e[:log_odds_ratios_itemized] = e["features"].collect {|k,v|
-    [k, log_odds_ratios_by_feature[k]]
-  }
-  
-  sum_log_odds = e[:log_odds_ratios_itemized].collect {|f| f[1]}.compact.sum
-  e[:odds_ratio_no_show] = Math.exp( sum_log_odds )
-  pretest_odds = 0.1 / 0.9
-  posttest_odds = e[:odds_ratio_no_show] * pretest_odds 
-  e[:prob_no_show] = posttest_odds / (1 + posttest_odds)
-}
 
+rb=ReportBuilder.new
+
+
+Analyze.assign_probability_based_on_log_odds_hash( @encounters_all, {})
+
+squares = test_no_show.collect {|e| (1.0 - e[:prob_no_show]) ** 2 } + 
+  test_show.collect {|e| (0.0 - e[:prob_no_show]) ** 2 }
+
+rms_error = Math.sqrt(squares.mean)
+puts "  if we assign everyone the baseline probability, RMS error of #{ rms_error }"
+
+
+
+Analyze.assign_probability_based_on_log_odds_hash( @encounters_all, log_odds_ratios_by_feature)
+
+a=@encounters_all.collect {|e| e[:prob_no_show]}.to_vector
+rb.add(Statsample::Graph::Histogram.new(a))
+
+b=all_no_show.collect {|e| e[:prob_no_show]}.to_vector
+rb.add(Statsample::Graph::Histogram.new(b))
+
+
+squares = test_no_show.collect {|e| (1.0 - e[:prob_no_show]) ** 2 } + 
+  test_show.collect {|e| (0.0 - e[:prob_no_show]) ** 2 }
+
+rms_error = Math.sqrt(squares.mean)
+puts "  Method 1: a validation was performed at RMS error of #{ rms_error }"
+
+
+
+
+Analyze.assign_probability_based_on_log_odds_hash( @encounters_all, log_odds_ratios_by_feature_2)
+
+a=@encounters_all.collect {|e| e[:prob_no_show]}.to_vector
+rb.add(Statsample::Graph::Histogram.new(a))
+
+a=all_no_show.collect {|e| e[:prob_no_show]}.to_vector
+rb.add(Statsample::Graph::Histogram.new(a))
+
+
+squares = test_no_show.collect {|e| (1.0 - e[:prob_no_show]) ** 2 } + 
+  test_show.collect {|e| (0.0 - e[:prob_no_show]) ** 2 }
+
+rms_error = Math.sqrt(squares.mean)
+puts "  Method 2: a validation was performed at RMS error of #{ rms_error }"
+
+
+rb.save_html('histogram.html')
 
 
 # =============================================================================
 # =========================   validate the model   ============================
-squares = @encounters_all.status_no_show.collect {|e| (1.0 - e[:prob_no_show]) ** 2 } + 
-  @encounters_all.status_completed.collect {|e| (0.0 - e[:prob_no_show]) ** 2 }
+# squares = test_no_show.collect {|e| (1.0 - e[:prob_no_show]) ** 2 } +
+#   test_show.collect {|e| (0.0 - e[:prob_no_show]) ** 2 }
+#
+# rms_error = Math.sqrt(squares.mean)
+# puts "a validation was performed at RMS error of #{ rms_error }"
 
-rms_error = Math.sqrt(squares.mean)
-puts "a validation was performed at RMS error of #{ rms_error }"
-
+raise "x"
 # threshold_of_no_show = 1 - 0.74 # greater than
 
 # puts "with a threahold of #{ threshold_of_no_show }, the accuracy of prediction was #{ }"
-step_size = 0.025
+step_size = 0.015
 
 puts "Saving as --#{ validation_filename }--"
 CSV.open("#{ validation_filename }", "wb") do |csv|
