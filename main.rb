@@ -61,6 +61,9 @@ validation_filename = "validation.csv"
 
 puts "Loading data file #{ input_file }"
 @encounters_all = CSV.read(input_file, {headers: true})
+  .select {|e| ["return patient visit", "new patient visit"].include? e["Visit Type"].downcase}
+  .select {|e| e["Department"].downcase == "neurology south pavilion"}
+  
 puts "  Loaded; there are #{ @encounters_all.size} rows"
 
 puts "Loading zip code data"
@@ -134,9 +137,13 @@ encounters_by_mrn = @encounters_all.group_by {|e| e["MRN"]}
   # features
   prior_encounters_2_yrs = encounters_by_mrn[e["MRN"]].select {|f| f["appt_at"] > (e["appt_at"] - 730) and f["appt_at"] < e["appt_at"] }
   
-  prior_encounters_show = prior_encounters_2_yrs.status_completed
-  prior_encounters_no_show = prior_encounters_2_yrs.status_no_show
-  prior_encounters_cancelled = prior_encounters_2_yrs.status_cancelled
+  n_prior_encounters_show = prior_encounters_2_yrs.status_completed.size
+  n_prior_encounters_no_show = prior_encounters_2_yrs.status_no_show.size
+  n_prior_encounters_cancelled = prior_encounters_2_yrs.status_cancelled.size
+  
+  # n_prior_encounters_show > 5 ? ">5" : n_prior_encounters_show
+  # n_prior_encounters_no_show > 5 ? ">5" : n_prior_encounters_no_show
+  # n_prior_encounters_cancelled > 5 ? ">5" : n_prior_encounters_cancelled
   
   zip = e["Zip Code"] ? e["Zip Code"][0..4].rjust(5, "0") : "absent"
   dist = distance_by_zip[ zip ]   # distance from hosp
@@ -145,30 +152,30 @@ encounters_by_mrn = @encounters_all.group_by {|e| e["MRN"]}
 
   # e["features"] = {
   #   "zip_#{ zip }" => 1,
-  #   "prior_show_past_2yr_#{ prior_encounters_show.size.to_s.rjust(2, "0") }" => 1,
-  #   "prior_no_show_past_2yr_#{ prior_encounters_no_show.size.to_s.rjust(2, "0") }" => 1,
-  #   "prior_cancellations_past_2yr_#{ prior_encounters_cancelled.size.to_s.rjust(2, "0") }" => 1
   # } #.select {|k,v| k!=nil and (v == 1 or v == true)}
   
   e["features"] = {
     "dist_#{ Analyze.categorize_continuous_variable_log(dist, 2, 4, 0, 1024) }_km" => 1,
     "age_decade_#{ Analyze.categorize_continuous_variable( e["Age at Encounter"].to_i, 10, 3, 10, 90)  }" => 1,
-    # "zip_#{ zip }" => 1,
+    "zip_#{ zip }" => 1,
     "gender_male" => e["Gender"].downcase == "male" ? 1 : 0,
     "appt_made_#{ Analyze.categorize_continuous_variable_log(e["appt_booked_on"] ? (e["appt_at"] - e["appt_booked_on"] + 1) : nil, 2, 4, 0, 256 )  }d_advance" => 1,
-    "dept_#{ e["Department"].downcase.gsub(" ", "_") }" => 1,
+    # "dept_#{ e["Department"].downcase.gsub(" ", "_") }" => 1,
     "appt_hour_#{ e["appt_at"].hour.to_s.rjust(2, "0") }" => 1,
     "appt_type_#{ e["Visit Type"].downcase }" => 1,
-    "prior_show_past_2yr" =>  prior_encounters_show.size,
-    "prior_no_show_past_2yr" => prior_encounters_no_show.size,
-    "prior_cancellations_past_2yr" => prior_encounters_cancelled.size
+    "prior_show_past_2yr" =>  n_prior_encounters_show,
+    "prior_no_show_past_2yr" => n_prior_encounters_no_show,
+    "prior_cancellations_past_2yr" => n_prior_encounters_cancelled
+    # "prior_show_past_2yr_#{ n_prior_encounters_show.to_s.rjust(2, "0") }" => 1,
+    # "prior_no_show_past_2yr_#{ n_prior_encounters_no_show.to_s.rjust(2, "0") }" => 1,
+    # "prior_cancellations_past_2yr_#{ n_prior_encounters_cancelled.to_s.rjust(2, "0") }" => 1
   }.select {|k,v| v!=nil }
 
-  # remove the uncategorizables - because in training contributes to linear dependence
-  # e["features"].delete("dist__km")
-  # e["features"].delete("appt_made_d_advance")
-  # e["features"].delete("appt_type_return patient telemedicine")
-  # e["features"].delete("appt_decade_50")
+  e["features"].delete("dist__km")
+
+  e["outcomes"] = {
+    "no_show" => [e].status_no_show.any? ? true : ([e].status_completed.any? ? false : nil)
+  }
   
 }
 puts "  done"
@@ -180,7 +187,7 @@ puts "  done"
 
 puts "Separating into training and test sets"
 
-training_fraction = 0.25
+training_fraction = 0.45
 all_show = @encounters_all.status_completed
 all_no_show = @encounters_all.status_no_show
 
