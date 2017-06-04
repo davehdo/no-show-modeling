@@ -118,9 +118,10 @@ module Analyze
       
       log_odds_ratio = Math.log( odds_ratio ) # base e
       se_log_odds_ratio = Math.sqrt( (1.0 / a) + (1.0 / b) + (1.0 / c) + (1.0 / d)) 
-            
-      lower = Math.exp(log_odds_ratio - 1.28 * se_log_odds_ratio )
-      upper = Math.exp(log_odds_ratio + 1.28 * se_log_odds_ratio )
+      
+      # 1.28 is 80%     1.65 is 90%   1.96 is 95%
+      lower = Math.exp(log_odds_ratio - 1.65 * se_log_odds_ratio )
+      upper = Math.exp(log_odds_ratio + 1.65 * se_log_odds_ratio )
                 
       ds[feature_name] = arr.to_vector(:scale) if lower > 1.0 or upper < 1.0
     end
