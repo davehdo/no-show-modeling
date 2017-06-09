@@ -1,6 +1,5 @@
 require "csv"
 require "../filters.rb"
-# this will run faster on ruby than jruby
 # create a subset of a data file for faster development and testing
 
 # # =============================================================================
