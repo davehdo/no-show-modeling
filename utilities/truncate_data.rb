@@ -1,10 +1,11 @@
 require "csv"
-require "./filters.rb"
+require "../filters.rb"
 # this will run faster on ruby than jruby
+# create a subset of a data file for faster development and testing
 
 # # =============================================================================
 # # ===============================  parameters  ================================
-root = "neurology_provider_visits_with_payer_20170608"
+root = "../neurology_provider_visits_with_payer_20170608"
 n_to_keep = 1000
 
 
@@ -18,6 +19,8 @@ output_file = "#{ root }_truncated_#{ n_to_keep }.csv"
 
 puts "Loading data file #{ input_file }"
 content = File.read(input_file)
+
+# if we use new instead of read, it doesn't parse, which is a very computationally expensive function
 
 @encounters_all = CSV.new(content, headers: true)
 # @encounters_all = CSV.read(input_file, {headers: true})
@@ -37,11 +40,11 @@ CSV.open("#{ output_file }", "wb") do |csv_out|
     if [item].type_office_followup.any?
       csv_out << item.values 
       n_saved += 1
-      puts "n_saved #{n_saved}"
+      puts "Saved #{n_saved}" if n_saved % 100 == 0
     end
   end
 
 end
 
 
-# puts "Saving #{@encounters_all.size} records into #{ output_file}"
+puts "Saved #{ n_saved } records into #{ output_file}"
