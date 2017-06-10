@@ -26,6 +26,13 @@ module Filters
     # Appt Status
     # ["Completed", "Canceled", "No Show", "Left without seen", "Arrived", "Scheduled"]
     
+    def type_office_new
+      self.select {|e| ["new patient visit"].include?( e["Visit Type"].downcase ) }
+    end
+    
+    def type_office_followup      
+      self.select {|e| ["return patient visit"].include?( e["Visit Type"].downcase ) }
+    end
     
     # ======
     def status_completed

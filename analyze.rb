@@ -1,5 +1,192 @@
 module Analyze
   require "./filters.rb"
+  require "csv"
+  require 'yaml'
+  
+  def self.confirm(prompt = 'Continue?' )
+    puts prompt
+
+    until ["y", "n"].include?(response = gets.chomp.downcase)
+      puts "#{ prompt } (y/n)"
+      
+    end
+    response == 'y'
+  end
+  
+  def self.output_characteristics( root, suffix="characteristics" )
+     output_hash = {}
+     
+     CSV.foreach( "#{ root }.csv", headers: true) do |row|
+        row.each do |k,v|
+           output_hash[k] ||= []
+           output_hash[k].push( v) unless output_hash[k].size > 20 or output_hash[k].include?(v)
+        end
+     end
+     
+     puts output_hash.inspect
+     
+     File.open("#{ root}_#{ suffix}.yml", 'w') {|f| f.write output_hash.to_yaml } #Store
+  end
+  
+  def self.resave_sample( n_to_sample, root, suffix="samp" )
+     puts "Taking a sample of the data"
+     n_rows = 0
+     CSV.foreach( "#{ root }.csv", headers: true) { n_rows += 1}
+     keep = (0...n_rows).to_a.sample(n_to_sample)
+     
+    resave_if( lambda {|item, i, s| keep.include?(i)}, root, suffix) 
+  end
+     
+     
+  def self.resave_followups_only( root, suffix="fu" )
+     resave_if( lambda {|item, i, s| [item].type_office_followup.any?}, root, suffix)
+  end
+  
+  
+  def self.resave_without_dup( root, suffix="fu" )
+      contents = File.read( "#{ root }.csv" )
+      csv_obj = CSV.new( contents, headers: true)
+     
+      # raise csv_obj.inspect
+      rows_and_unique_key = Array.new
+
+      csv_obj.each_with_index do |csv_row, i|
+         if csv_row["Appt Status"] == "Completed"
+            rows_and_unique_key << [i, "#{ csv_row["MRN"]}|#{csv_row["Appt. Time"]}|#{ csv_row["Appt. Length"] }|#{ csv_row["Visit Type"] }"]
+         else
+            rows_and_unique_key << [i, i] # automatically keep all of these
+         end
+      end
+
+      keepers = rows_and_unique_key.uniq {|a, b| b}.collect {|a,b| a}
+      puts "  Duplicate-removal would reduce from #{ rows_and_unique_key.size } to #{ keepers.size } rows"
+
+      resave_if( lambda {|item, i, s| keepers.include?(i)}, root, suffix)
+  end
+  
+  
+  def self.resave_if(lamda_block, root, suffix="fu" )
+    input_file = "#{ root }.csv"
+    output_file = "#{ root }_#{ suffix }.csv"
+
+    if !File.exists?( output_file ) or confirm("  Warning: Overwrite #{ output_file }?")
+       puts "Loading data file #{ input_file }"
+
+       n_read = 0
+       n_saved = 0
+
+       CSV.open("#{ output_file }", "wb") do |csv_out|
+
+         CSV.foreach( input_file, headers: true ) do |row|
+            if n_read == 0
+               headers = row.collect {|a,b| a}
+               csv_out << headers
+            end
+         
+            item = Hash[row]
+            # raise item.inspect
+            if lamda_block.call(item, n_read, n_saved)
+               csv_out << row.collect {|a,b| b} 
+               n_saved += 1
+               puts "  Saved #{n_saved}" if n_saved % 1000 == 0
+            end
+            n_read += 1
+         end
+       end
+
+       puts "Saved #{ n_saved } records (of #{n_read}) into #{ output_file}"
+    end
+  end
+  
+  
+  
+  def self.extract_features( encounters_all )
+    puts "Extracting features"
+
+    puts "  Loading zip code data"
+    distance_by_zip = Hash[CSV.read("zipcode_distances_from_19104.csv", {headers: true}).collect {|e| [e["ZIP"], e["DIST_KM"].to_f]}]
+    puts "    Loaded"
+
+    # in order to find specific patient's prior encounters
+    encounters_by_mrn = encounters_all.group_by {|e| e["MRN"]}
+
+
+    encounters_all.each {|e| 
+      # features
+      prior_encounters_2_yrs = encounters_by_mrn[e["MRN"]].select {|f| f["appt_at"] > (e["appt_at"] - 730) and f["appt_at"] < e["appt_at"] }
+  
+      n_prior_encounters_show = prior_encounters_2_yrs.status_completed.size
+      n_prior_encounters_no_show = prior_encounters_2_yrs.status_no_show.size
+      n_prior_encounters_cancelled = prior_encounters_2_yrs.status_cancelled.size
+  
+      zip = e["Zip Code"] ? e["Zip Code"][0..4].rjust(5, "0") : "absent"
+      dist = distance_by_zip[ zip ]   # distance from hosp
+
+      # we do a sparse encoding -- anything not listed in features is assumed to be 0
+
+      e["features"] = {
+        "dist_km" => Analyze.categorize_continuous_variable_log(dist, 2, 4, 0, 1024),
+        "age_decade" => Analyze.categorize_continuous_variable( e["Age at Encounter"].to_i, 10, 3, 10, 90),
+        # "zip_#{ zip }" => 1,
+        "gender" => e["Gender"].downcase == "male" ? "male" : "female",
+        "appt_made_#{ Analyze.categorize_continuous_variable_log(e["appt_booked_on"] ? (e["appt_at"] - e["appt_booked_on"] + 1) : nil, 2, 4, 0, 256 )  }d_advance" => 1,
+        "dept" => e["Department"].downcase.gsub(" ", "_"),
+        "appt_hour" => e["appt_at"].hour.to_s.rjust(2, "0"),
+        "appt_type" => e["Visit Type"].downcase,
+        "prior_show_past_2yr" =>  n_prior_encounters_show,
+        "prior_no_show_past_2yr" => n_prior_encounters_no_show,
+        "prior_cancellations_past_2yr" => n_prior_encounters_cancelled,
+        # "prior_show_past_2yr_#{ n_prior_encounters_show.to_s.rjust(2, "0") }" => 1,
+        # "prior_no_show_past_2yr_#{ n_prior_encounters_no_show.to_s.rjust(2, "0") }" => 1,
+        # "prior_cancellations_past_2yr_#{ n_prior_encounters_cancelled.to_s.rjust(2, "0") }" => 1,
+        "outcome" => [e].status_no_show.any? ? "no_show" : ([e].status_completed.any? ? "show" : nil)
+      }.select {|k,v| v!=nil }
+
+    }
+    puts "  done"
+    encounters_all
+  end
+  
+  
+  def self.parse_timestamps( encounters_all, timeslot_size = 15 )
+    puts "Parsing timestamps"
+    encounters_all.each {|e| 
+      e["appt_at"] = DateTime.strptime(e["Appt. Time"], ' %m/%d/%Y  %H:%M ')
+      e["checkin_time_obj"] = DateTime.strptime(e["Checkin Time"], ' %m/%d/%Y  %H:%M ') if e["Checkin Time"]
+      e["clinic_session"] = "#{ e["Provider"]}|#{ e["appt_at"].strftime("%F|%p") }"
+      e["contacted_on"] = DateTime.strptime( e["Contact Date"], " %m/%d/%Y") if e["Contact Date"]
+      # begin
+      #   e["appt_booked_on"] = DateTime.strptime(e["Appt. Booked on"], "%m/%d/%y") if e["Appt. Booked on"]
+      #   e["appt_booked_on"] = nil if e["appt_booked_on"] > e["appt_at"]
+      # rescue
+      #   false
+      # end
+    
+      # e.g. timeslot   KIMBARIS, GRACE CHEN|2014-09-18|13:15
+      e["timeslots"] = (0...(e["Appt. Length"].to_i)).step(timeslot_size).collect {|interval| 
+        timeslot = e["appt_at"] + (interval / 24.0 / 60.0)
+        "#{ e["Provider"]}|#{ timeslot.strftime("%F|%H:%M") }"  
+      }
+      puts "  Warning: prov has #{ e["Appt. Length"] } min appt but our analysis uses #{ timeslot_size } min timeslots (#{e["timeslots"]})" if (1.0 * e["Appt. Length"].to_i / timeslot_size).to_i != e["timeslots"].size
+  
+    }
+    puts "  done"
+    encounters_all
+  end
+
+  # =============================================================================
+  # ===========================   remove duplicates  ============================
+  # Pecularities of the data
+  # - sometimes there is identical patient in a slot twice, one cancelled, and one completed
+  # - Botox and EMG can sometimes have duplicate, triplicate, or even 4x of
+  #   same patient, same timeslot, same visit type, same status (completed)
+  #   DOE,JOHN EMG (Completed 15) / DOE,JOHN EMG (Completed 15)
+
+  # amongst completed encounters, eliminate the duplicate encounters associated 
+  # with Botox and EMG so we don't overcount minutes of patients seen
+  # 
+
+  
   
   def self.categorize_continuous_variable_log( var=nil, base=10, digits=1, min=nil, max=nil)
     if var and var > 0
@@ -229,10 +416,10 @@ module Analyze
         date: Date.parse( parts[1] ),
         am_pm: parts[2],
         encounters: encounters_in_session,
-        hours_booked: (encounters_in_session.status_completed + encounters_in_session.status_no_show + encounters_in_session.status_scheduled).sum_minutes / 60.0,
-        hours_completed: (encounters_in_session.status_completed ).sum_minutes / 60.0,
-        is_full_session: (encounters_in_session.status_completed + encounters_in_session.status_no_show + encounters_in_session.status_scheduled).sum_minutes >= 120,
-        is_future_session: (encounters_in_session.status_scheduled ).sum_minutes >= 30,
+        hours_booked: ((encounters_in_session.status_completed + encounters_in_session.status_no_show + encounters_in_session.status_scheduled).sum_minutes || 0) / 60.0,
+        hours_completed: ((encounters_in_session.status_completed ).sum_minutes || 0) / 60.0,
+        is_full_session: ((encounters_in_session.status_completed + encounters_in_session.status_no_show + encounters_in_session.status_scheduled).sum_minutes || 0) >= 120,
+        is_future_session: ((encounters_in_session.status_scheduled ).sum_minutes || 0) >= 30,
         visual: visual,
       }
     }
