@@ -1,5 +1,5 @@
-# this script analyzes billing reports
-# Report is calling “Charges, Payments and Adjustments”
+# this script analyzes EPIC data
+
 # exported from business objects… (PROMIS)
 
 # =====================   GETTING STARTED INSTRUCTIONS   ====================
@@ -11,11 +11,11 @@
 
 recommend_ruby_version = "2.3.0"
 
-puts "Warning: Running ruby version #{  RUBY_VERSION }. (Recommend #{ recommend_ruby_version })" unless recommend_ruby_version ==  RUBY_VERSION
+puts "Warning: Running ruby version #{ RUBY_VERSION }. (Recommend #{ recommend_ruby_version })" unless recommend_ruby_version ==  RUBY_VERSION
 
 require "csv"
 require "./filters.rb"
-require "./reports.rb"
+# require "./reports.rb"
 require "./analyze.rb"
 # require 'statsample' # if cannot find statssample; run gem install statsample
 
@@ -28,6 +28,7 @@ require 'weka' # requires jruby
 # ===============================  parameters  ================================
 input_root = "neurology_provider_visits_with_payer_20170608"
 timeslot_size = 15 # minutes
+output_root = "logistic_classifier"
 # stats_odds_ratios_filename = "stats_odds_ratios.csv"
 # stats_odds_ratios_significant_filename = "stats_odds_ratios_significant.csv"
 # provider_grouping_template_filename = "provider_groupings_template.csv"
@@ -46,7 +47,7 @@ Analyze.resave_without_dup( "#{ input_root}_fu", "dup")
 # =======================  Step 3 : truncate for now  =========================
 Analyze.resave_sample( 2000, "#{ input_root}_fu_dup", "samp")
 
-Analyze.output_characteristics( "#{ input_root}_fu_dup_samp" )
+Analyze.output_characteristics( "#{ input_root}_fu_dup_samp", :except => [""] )
 
 
 # =============================================================================
@@ -169,19 +170,29 @@ puts "  Done"
 # ====================  Outputs some performance metrics  =====================
 # RMS error should be less than 0.3
 puts evaluation.summary
+File.open("#{ output_root }_report.txt", 'w') { |file| 
+   file.write """
+================================  EVALUATION  =================================
+#{ evaluation.summary }
+   
+============================  CLASSIFIER DETAILS  =============================
+#{ classifier.globalInfo }
+
+========================  CLASSIFIER TRAINING OUTCOME  ========================
+#{ classifier.toString }   
+
+===========================  TRAINING DATA DETAILS  ===========================
+date: #{ Time.now }
+input_root: #{ input_root }
+training_fraction: #{ training_fraction}
+training_features: #{ training_features.size } 
+test_features: #{ test_features.size }
+
+"""
+}
 
 
-# =============================================================================
-# =============  Outputs a table of coefficients and odds ratios  =============
-puts classifier.toString
 
-# puts "conditional estimators"
-# puts classifier.getConditionalEstimators.inspect
-
-# puts "options"
-# puts classifier.getOptions
-
-# puts "coef"
 # =============================================================================
 # ========  An obnoxious process required to get the coeffiecients out  ========
 
@@ -189,10 +200,10 @@ puts classifier.toString
 
 coefficients = Analyze.get_logistic_coefficients_from_classifier( classifier, training_instances )
 
-
-
-puts coefficients.inspect
-
-
-raise "hi"
+CSV.open("#{ output_root }_coefficients.csv", "wb") do |csv_out|
+   csv_out << ["key", "value", "coefficient"]
+   coefficients.each do |e|
+      csv_out << e
+   end
+end
 
