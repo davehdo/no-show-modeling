@@ -26,6 +26,10 @@ module Filters
     # Appt Status
     # ["Completed", "Canceled", "No Show", "Left without seen", "Arrived", "Scheduled"]
     
+    def loc_south_pav
+       self.select {|e| ["NEUROLOGY SOUTH PAVILION", "NEUROLOGY HUP"].include?( e["Department"] ) }
+    end
+    
     def type_office_new
       self.select {|e| ["new patient visit"].include?( e["Visit Type"].downcase ) }
     end

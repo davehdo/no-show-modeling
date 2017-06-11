@@ -1,8 +1,10 @@
 module Analyze
-  require "./filters.rb"
-  require "csv"
-  require 'yaml'
-  
+   require "./filters.rb"
+   require "csv"
+   require 'yaml'
+     
+   # ==========================================================================
+   # =========================  Weka-related helpers  =========================
 
    def self.get_logistic_coefficients_from_classifier( classifier, training_instances )
       require 'weka'
@@ -15,7 +17,6 @@ module Analyze
       logit_filter.setInputFormat training_instances
       logit_filtered = Filter.useFilter(training_instances, logit_filter) # class instances
 
-
       # java_array = classifier.coefficients.to_a #converting java array to ruby
       # coeffs = java_array.map(&:to_a) #converting second level of java array to ruby
       # puts logit_filtered.inspect
@@ -24,115 +25,101 @@ module Analyze
       (vals.size == 2 ? [vals.last] : vals).collect {|f| [attr.name, f]}
       }.flatten(1)
 
-
       raise "Error: there are #{ coeffs.size } coefficients and #{ attr_val_pairs.size } attr_val_pairs" unless coeffs.size == (attr_val_pairs.size + 1)
 
       table_unflattened = ([["Intercept", ""]] + attr_val_pairs).zip( coeffs.collect(&:first) )
-
       table = table_unflattened.collect {|e| e.flatten}
-
    end
   
-  def self.load_and_extract_features_from_encounters_file( input_file_root, indexes=nil)
+  
+   def self.add_instances_from_encounters_array( features_array, instances )
+      feature_names = instances.attributes.collect {|e| e.name }
+      # puts "Make sure these features are correct"
+      # instances.attributes.each {|e| puts "  #{e.name} has options #{e.values}" }
+      data = features_array.collect do |feature_hash|
+       feature_names.collect {|feature_name| x=feature_hash[feature_name] }
+      end
+      instances.add_instances(data ) # , weight: 2.0
+      instances
+   end
+
+
+  
+   # ==========================================================================
+   # =========================  CSV file manipulators  ========================
+ 
+   def self.load_and_extract_features_from_encounters_file( input_file_root, indexes=nil)
      features = Array.new
      n_read = 0
      CSV.foreach( "#{ input_file_root }.csv", headers: true ) do |row|
-  
-       if indexes.nil? or indexes.include?( n_read )
-         item = Hash[row]
-         Analyze.parse_timestamps( [item] )
-         Analyze.extract_features( [item] )
-         features << item["features"]
 
-       end
-       n_read += 1
+        if indexes.nil? or indexes.include?( n_read )
+           item = Hash[row]
+           Analyze.parse_timestamps( [item] )
+           Analyze.extract_features( [item] )
+           features << item["features"]
+        end
+        n_read += 1
+        puts "  #{ n_read}" if n_read % 2000 == 0
      end
      features
-     
-  end
-  
-  def self.add_instances_from_encounters_array( features_array, instances )
-     feature_names = instances.attributes.collect {|e| e.name }
-     
-     # puts "Make sure these features are correct"
-     # instances.attributes.each {|e| puts "  #{e.name} has options #{e.values}" }
-
-     data = features_array.collect do |feature_hash|
-       # because many of the features fields are sparsely encoded, we fill in nils with zero
-       feature_names.collect {|feature_name| x=feature_hash[feature_name] }
-     end
-
-     
-     instances.add_instances(data ) # , weight: 2.0
-     
-
-     
-     instances
    end
 
 
-  def self.confirm(prompt = 'Continue?' )
-    puts prompt
-
-    until ["y", "n"].include?(response = gets.chomp.downcase)
-      puts "#{ prompt } (y/n)"
-      
-    end
-    response == 'y'
-  end
-  
-  def self.output_characteristics( root, suffix="characteristics" )
+   def self.output_characteristics( root, **args )
      puts "Extracting and saving data set characteristics"
-     
-     check_overwrite( "#{root}_#{suffix}.yml" ) do
+     args[:suffix] ||= "characteristics"
+     args[:censor] ||= []
+  
+     puts "  Censor #{ args[:censor] }"
+     check_overwrite( "#{root}_#{args[:suffix]}.yml" ) do
         output_hash = {}
-     
         CSV.foreach( "#{ root }.csv", headers: true) do |row|
            row.each do |k,v|
+              v = Analyze.censor(v) if args[:censor].include?(k)
               output_hash[k] ||= []
               output_hash[k].push( v) unless output_hash[k].size > 20 or output_hash[k].include?(v)
            end
         end
-     
+  
         puts output_hash.inspect
-     
-        File.open("#{ root}_#{ suffix}.yml", 'w') {|f| f.write output_hash.to_yaml } #Store
+        File.open("#{ root}_#{ args[:suffix]}.yml", 'w') {|f| f.write output_hash.to_yaml } #Store
      end
-  end
-  
-  def self.resave_sample( n_to_sample, root, suffix="samp" )
-     puts "Taking a sample of the data"
-     check_overwrite( "#{root}_#{suffix}.csv" ) do
-     
-       n_rows = 0
-       CSV.foreach( "#{ root }.csv", headers: true) { n_rows += 1}
-       keep = (0...n_rows).to_a.sample(n_to_sample)
-     
-       resave_if( lambda {|item, i, s| keep.include?(i)}, root, suffix) 
-    end
-  end
-     
-     
-  def self.resave_followups_only( root, suffix="fu" )
-     resave_if( lambda {|item, i, s| [item].type_office_followup.any?}, root, suffix)
-  end
-  
-  def self.check_overwrite( output_file )
-     if !File.exists?( output_file ) or confirm("  Warning: Overwrite #{ output_file }?")
-        yield
-     end
-  end
+   end
   
   
-  def self.resave_without_dup( root, suffix="fu", uniqueness= nil )
-     uniqueness ||= lambda {|e| "#{ e["Appt Status"]}|#{ e["MRN"]}|#{e["Appt. Time"]}|#{ e["Appt. Length"] }|#{ e["Visit Type"] }"}
-     
+  
+   # ==========================================================================
+   # ===========================  CSV file filters  ===========================
+
+   def self.resave_sample( n_to_sample, root, suffix="samp" )
+      puts "Taking a sample of the data"
+      check_overwrite( "#{root}_#{suffix}.csv" ) do  
+         n_rows = 0
+         CSV.foreach( "#{ root }.csv", headers: true) { n_rows += 1}
+         keep = (0...n_rows).to_a.sample(n_to_sample)
+
+         resave_if( lambda {|item, i, s| keep.include?(i)}, root, suffix) 
+      end
+      "#{ root }_#{ suffix }"
+   end
+  
+  
+   # def self.resave_followups_only( root, suffix="fu" )
+   #   resave_if( lambda {|item, i, s| [item].type_office_followup.any?}, root, suffix)
+   # end
+   #
+
+
+   def self.resave_without_dup( root, suffix="fu", uniqueness= nil )
+      uniqueness ||= lambda {|e| "#{ e["Appt Status"]}|#{ e["MRN"]}|#{e["Appt. Time"]}|#{ e["Appt. Length"] }|#{ e["Visit Type"] }"}
+  
       output_file = "#{ root }_#{ suffix }.csv"
       check_overwrite( output_file ) do
-         
+      
          contents = File.read( "#{ root }.csv" )
          csv_obj = CSV.new( contents, headers: true)
-     
+  
          # raise csv_obj.inspect
          rows_and_unique_key = Array.new
 
@@ -145,46 +132,56 @@ module Analyze
 
          resave_if( lambda {|item, i, s| keepers.include?(i)}, root, suffix)
       end
-  end
-  
-  
-  def self.resave_if(lamda_block, root, suffix="fu" )
-    input_file = "#{ root }.csv"
-    output_file = "#{ root }_#{ suffix }.csv"
+      "#{ root }_#{ suffix }"
+   end
 
-    if !File.exists?( output_file ) or confirm("  Warning: Overwrite #{ output_file }?")
-       puts "Loading data file #{ input_file }"
 
-       n_read = 0
-       n_saved = 0
+   def self.resave_if(lamda_block, root, suffix="fu" )
+      input_file = "#{ root }.csv"
+      output_file = "#{ root }_#{ suffix }.csv"
 
-       CSV.open("#{ output_file }", "wb") do |csv_out|
+      if !File.exists?( output_file ) or confirm("  Warning: Overwrite #{ output_file }?")
+         puts "Loading data file #{ input_file }"
 
-         CSV.foreach( input_file, headers: true ) do |row|
-            if n_read == 0
-               headers = row.collect {|a,b| a}
-               csv_out << headers
+         n_read = 0
+         n_saved = 0
+
+         CSV.open("#{ output_file }", "wb") do |csv_out|
+
+            CSV.foreach( input_file, headers: true ) do |row|
+               if n_read == 0
+                  headers = row.collect {|a,b| a}
+                  csv_out << headers
+               end
+
+               item = Hash[row]
+               # raise item.inspect
+               if lamda_block.call(item, n_read, n_saved)
+                  csv_out << row.collect {|a,b| b} 
+                  n_saved += 1
+                  puts "  Saved #{n_saved}" if n_saved % 1000 == 0
+               end
+               n_read += 1
             end
-         
-            item = Hash[row]
-            # raise item.inspect
-            if lamda_block.call(item, n_read, n_saved)
-               csv_out << row.collect {|a,b| b} 
-               n_saved += 1
-               puts "  Saved #{n_saved}" if n_saved % 1000 == 0
-            end
-            n_read += 1
          end
-       end
 
-       puts "Saved #{ n_saved } records (of #{n_read}) into #{ output_file}"
-    end
-  end
+         puts "  Saved #{ n_saved } records (of #{n_read}) into #{ output_file}"
+      end
+      "#{ root }_#{ suffix }"
+   end
+ 
+  
+   # ==========================================================================
+   # ==========================================================================
   
   def self.distance_by_zip
       puts "  Loading zip code data" unless @distance_by_zip
       @distance_by_zip ||= Hash[CSV.read("zipcode_distances_from_19104.csv", {headers: true}).collect {|e| [e["ZIP"], e["DIST_KM"].to_f]}]
   end
+
+
+   # ==========================================================================
+   # =========================  Encounter manipulators  =======================
   
   def self.extract_features( encounters_all )
     puts "Extracting features" unless encounters_all.size < 2
@@ -205,6 +202,16 @@ module Analyze
       zip = e["Zip Code"] ? e["Zip Code"][0..4].rjust(5, "0") : "absent"
       dist = distance_by_zip[ zip ]   # distance from hosp
 
+      if ["", nil].include?(e["Benefit Plan"])
+         benefit_plan_category = "BLANK"
+      elsif e["Benefit Plan"] =~ /medicare/i
+         benefit_plan_category = "medicare"
+      elsif e["Benefit Plan"] =~ /medicaid/i
+         benefit_plan_category = "medicaid"
+      else
+         benefit_plan_category = "other"
+      end
+         
       e["features"] = {
         "dist_km" => Analyze.categorize_continuous_variable_log(dist, 2, 4, 0, 1024),
         "age_decade" => Analyze.categorize_continuous_variable( e["Age at Encounter"].to_i, 10, 3, 10, 90),
@@ -217,7 +224,8 @@ module Analyze
         "prior_show_past_2yr" =>  n_prior_encounters_show,
         "prior_no_show_past_2yr" => n_prior_encounters_no_show,
         "prior_cancellations_past_2yr" => n_prior_encounters_cancelled,
-        "outcome" => [e].status_no_show.any? ? "no_show" : ([e].status_completed.any? ? "show" : nil)
+        "outcome" => [e].status_no_show.any? ? "no_show" : ([e].status_completed.any? ? "show" : nil),
+        "payer" => benefit_plan_category
       }.select {|k,v| v!=nil }
 
     }
@@ -241,29 +249,47 @@ module Analyze
       # end
     
       # e.g. timeslot   KIMBARIS, GRACE CHEN|2014-09-18|13:15
-      e["timeslots"] = (0...(e["Appt. Length"].to_i)).step(timeslot_size).collect {|interval| 
-        timeslot = e["appt_at"] + (interval / 24.0 / 60.0)
-        "#{ e["Provider"]}|#{ timeslot.strftime("%F|%H:%M") }"  
-      }
-      puts "  Warning: prov has #{ e["Appt. Length"] } min appt but our analysis uses #{ timeslot_size } min timeslots (#{e["timeslots"]})" if (1.0 * e["Appt. Length"].to_i / timeslot_size).to_i != e["timeslots"].size
+      # e["timeslots"] = (0...(e["Appt. Length"].to_i)).step(timeslot_size).collect {|interval|
+      #   timeslot = e["appt_at"] + (interval / 24.0 / 60.0)
+      #   "#{ e["Provider"]}|#{ timeslot.strftime("%F|%H:%M") }"
+      # }
+      # puts "  Warning: prov has #{ e["Appt. Length"] } min appt but our analysis uses #{ timeslot_size } min timeslots (#{e["timeslots"]})" if (1.0 * e["Appt. Length"].to_i / timeslot_size).to_i != e["timeslots"].size
   
     }
     puts "  done" unless encounters_all.size < 2
     encounters_all
   end
 
-  # =============================================================================
-  # ===========================   remove duplicates  ============================
-  # Pecularities of the data
-  # - sometimes there is identical patient in a slot twice, one cancelled, and one completed
-  # - Botox and EMG can sometimes have duplicate, triplicate, or even 4x of
-  #   same patient, same timeslot, same visit type, same status (completed)
-  #   DOE,JOHN EMG (Completed 15) / DOE,JOHN EMG (Completed 15)
 
-  # amongst completed encounters, eliminate the duplicate encounters associated 
-  # with Botox and EMG so we don't overcount minutes of patients seen
-  # 
 
+   # ==========================================================================
+   # ===============================  Utilities  ==============================
+
+   def self.confirm(prompt = 'Continue?' )
+     puts prompt
+
+     until ["y", "n"].include?(response = gets.chomp.downcase)
+       puts "#{ prompt } (y/n)"
+    
+     end
+     response == 'y'
+   end
+
+   def self.check_overwrite( output_file )
+      if !File.exists?( output_file ) or confirm("  Warning: Overwrite #{ output_file }?")
+         yield
+      end
+   end
+
+
+  # in string, replaces all the digits with 9 and letters with x or X
+  def self.censor( par )
+     if par.class == String
+        par.gsub(/\d/, "9").gsub(/[a-z]/, "x").gsub(/[A-Z]/, "X")
+     else
+        puts "Warning: do not know how to censor a #{ par.class }"
+     end
+  end
   
   
   def self.categorize_continuous_variable_log( var=nil, base=10, digits=1, min=nil, max=nil)
@@ -350,106 +376,106 @@ module Analyze
   end
 
 
-  def self.train_multiple_regression( encounters_no_show, encounters_completed )
-    puts "Running multiple regression "
-    features_for_no_show = encounters_no_show.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
-    features_for_show = encounters_completed.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
-
-    n_show = encounters_completed.size
-    n_no_show = encounters_no_show.size
-
-    unique_feature_names = (features_for_show.keys + features_for_no_show.keys).uniq
-
-    # multiple regression example
-    ds = {}
-    
-    puts "  Assembling arrays for #{ unique_feature_names.size } predictors"
-    unique_feature_names.each do |feature_name|
-      arr = (encounters_no_show + encounters_completed ).collect {|e| e["features"][feature_name] || 0}
-      
-      # we keep only the features that have decent predictive value, 
-      # as calcuated by an odds ratio.
-      # This helps reduce the computational requirement for training
-      # and reduces that chance that "Regressors are linearly dependent"
-      n_feature_and_show = (features_for_show[ feature_name ] || []).count {|k,v| v != 0}
-      n_feature_and_no_show = (features_for_no_show[ feature_name ] || []).count {|k,v| v != 0}
-
-      a = n_feature_and_no_show # exposed, bad outcome
-      c = n_no_show - n_feature_and_no_show # control, bad outcome
-      b = n_feature_and_show # exposed, good outcome
-      d = n_show - n_feature_and_show # control, good outcome
-  
-      odds_ratio = 1.0 * a * d / ( b * c)
-      
-      log_odds_ratio = Math.log( odds_ratio ) # base e
-      se_log_odds_ratio = Math.sqrt( (1.0 / a) + (1.0 / b) + (1.0 / c) + (1.0 / d)) 
-      
-      # 1.28 is 80%     1.65 is 90%   1.96 is 95%
-      lower = Math.exp(log_odds_ratio - 1.65 * se_log_odds_ratio )
-      upper = Math.exp(log_odds_ratio + 1.65 * se_log_odds_ratio )
-                
-      ds[feature_name] = arr.to_vector(:scale) if lower > 1.0 or upper < 1.0
-    end
-  
-    puts "  Assembling array of training outcomes"
-    # we use 10 and -10 as log odds
-    ds["no-show"] = (encounters_no_show.collect {2.0} + encounters_completed.collect {-2.0}).to_vector(:scale)
-    
-    puts "  Training the model"
-    lr=Statsample::Regression.multiple(ds.to_dataset,'no-show')
-  end  
-
-  
-  
-  def self.train_odds_ratios( encounters_no_show, encounters_completed )
-    features_for_no_show = encounters_no_show.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
-    features_for_show = encounters_completed.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
-
-    n_show = encounters_completed.size
-    n_no_show = encounters_no_show.size
-
-    unique_feature_names = (features_for_show.keys + features_for_no_show.keys).uniq
-
-    feature_statistics_array = unique_feature_names.collect {|feature_name|
-      n_feature_and_show = (features_for_show[ feature_name ] || []).count {|k,v| v == 1}
-      n_feature_and_no_show = (features_for_no_show[ feature_name ] || []).count {|k,v| v == 1}
-  
-  
-      # var_odds_ratio = (var_p_feature_given_show * var_p_feature_given_no_show) +
-      #   (var_p_feature_given_show * p_feature_given_no_show ** 2) +
-      #   (var_p_feature_given_no_show * p_feature_given_show ** 2)
-
-      # per md-calc https://www.medcalc.org/calc/odds_ratio.php
-  
-      a = n_feature_and_no_show # exposed, bad outcome
-      c = n_no_show - n_feature_and_no_show # control, bad outcome
-      b = n_feature_and_show # exposed, good outcome
-      d = n_show - n_feature_and_show # control, good outcome
-  
-      odds_ratio = 1.0 * a * d / ( b * c)
-
-      log_odds_ratio = Math.log( odds_ratio ) # base e
-      se_log_odds_ratio = Math.sqrt( (1.0 / a) + (1.0 / b) + (1.0 / c) + (1.0 / d)) 
-
-      # significant = ((odds_ratio_lower > 1.0) or ( odds_ratio_upper < 1.0))
-      {
-        feature_name: feature_name,
-        odds_ratio_of_no_show: odds_ratio,
-        or_95_ci_lower: Math.exp(log_odds_ratio - 1.96 * se_log_odds_ratio ),
-        or_95_ci_upper: Math.exp(log_odds_ratio + 1.96 * se_log_odds_ratio ),
-        n_feature_and_show: n_feature_and_show,
-        n_feature_and_no_show: n_feature_and_no_show,
-        n_show: n_show,
-        n_no_show: n_no_show,
-        log_odds_ratio: log_odds_ratio,
-        se_log_odds_ratio: se_log_odds_ratio,
-        or_80_ci_lower: Math.exp(log_odds_ratio - 1.28 * se_log_odds_ratio ),
-        or_80_ci_upper: Math.exp(log_odds_ratio + 1.28 * se_log_odds_ratio ),
-        # significant: significant
-      } 
-    }.sort_by {|e| e[:feature_name]}
-      
-  end
+  # def self.train_multiple_regression( encounters_no_show, encounters_completed )
+  #   puts "Running multiple regression "
+  #   features_for_no_show = encounters_no_show.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
+  #   features_for_show = encounters_completed.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
+  #
+  #   n_show = encounters_completed.size
+  #   n_no_show = encounters_no_show.size
+  #
+  #   unique_feature_names = (features_for_show.keys + features_for_no_show.keys).uniq
+  #
+  #   # multiple regression example
+  #   ds = {}
+  #
+  #   puts "  Assembling arrays for #{ unique_feature_names.size } predictors"
+  #   unique_feature_names.each do |feature_name|
+  #     arr = (encounters_no_show + encounters_completed ).collect {|e| e["features"][feature_name] || 0}
+  #
+  #     # we keep only the features that have decent predictive value,
+  #     # as calcuated by an odds ratio.
+  #     # This helps reduce the computational requirement for training
+  #     # and reduces that chance that "Regressors are linearly dependent"
+  #     n_feature_and_show = (features_for_show[ feature_name ] || []).count {|k,v| v != 0}
+  #     n_feature_and_no_show = (features_for_no_show[ feature_name ] || []).count {|k,v| v != 0}
+  #
+  #     a = n_feature_and_no_show # exposed, bad outcome
+  #     c = n_no_show - n_feature_and_no_show # control, bad outcome
+  #     b = n_feature_and_show # exposed, good outcome
+  #     d = n_show - n_feature_and_show # control, good outcome
+  #
+  #     odds_ratio = 1.0 * a * d / ( b * c)
+  #
+  #     log_odds_ratio = Math.log( odds_ratio ) # base e
+  #     se_log_odds_ratio = Math.sqrt( (1.0 / a) + (1.0 / b) + (1.0 / c) + (1.0 / d))
+  #
+  #     # 1.28 is 80%     1.65 is 90%   1.96 is 95%
+  #     lower = Math.exp(log_odds_ratio - 1.65 * se_log_odds_ratio )
+  #     upper = Math.exp(log_odds_ratio + 1.65 * se_log_odds_ratio )
+  #
+  #     ds[feature_name] = arr.to_vector(:scale) if lower > 1.0 or upper < 1.0
+  #   end
+  #
+  #   puts "  Assembling array of training outcomes"
+  #   # we use 10 and -10 as log odds
+  #   ds["no-show"] = (encounters_no_show.collect {2.0} + encounters_completed.collect {-2.0}).to_vector(:scale)
+  #
+  #   puts "  Training the model"
+  #   lr=Statsample::Regression.multiple(ds.to_dataset,'no-show')
+  # end
+  #
+  #
+  #
+  # def self.train_odds_ratios( encounters_no_show, encounters_completed )
+  #   features_for_no_show = encounters_no_show.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
+  #   features_for_show = encounters_completed.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
+  #
+  #   n_show = encounters_completed.size
+  #   n_no_show = encounters_no_show.size
+  #
+  #   unique_feature_names = (features_for_show.keys + features_for_no_show.keys).uniq
+  #
+  #   feature_statistics_array = unique_feature_names.collect {|feature_name|
+  #     n_feature_and_show = (features_for_show[ feature_name ] || []).count {|k,v| v == 1}
+  #     n_feature_and_no_show = (features_for_no_show[ feature_name ] || []).count {|k,v| v == 1}
+  #
+  #
+  #     # var_odds_ratio = (var_p_feature_given_show * var_p_feature_given_no_show) +
+  #     #   (var_p_feature_given_show * p_feature_given_no_show ** 2) +
+  #     #   (var_p_feature_given_no_show * p_feature_given_show ** 2)
+  #
+  #     # per md-calc https://www.medcalc.org/calc/odds_ratio.php
+  #
+  #     a = n_feature_and_no_show # exposed, bad outcome
+  #     c = n_no_show - n_feature_and_no_show # control, bad outcome
+  #     b = n_feature_and_show # exposed, good outcome
+  #     d = n_show - n_feature_and_show # control, good outcome
+  #
+  #     odds_ratio = 1.0 * a * d / ( b * c)
+  #
+  #     log_odds_ratio = Math.log( odds_ratio ) # base e
+  #     se_log_odds_ratio = Math.sqrt( (1.0 / a) + (1.0 / b) + (1.0 / c) + (1.0 / d))
+  #
+  #     # significant = ((odds_ratio_lower > 1.0) or ( odds_ratio_upper < 1.0))
+  #     {
+  #       feature_name: feature_name,
+  #       odds_ratio_of_no_show: odds_ratio,
+  #       or_95_ci_lower: Math.exp(log_odds_ratio - 1.96 * se_log_odds_ratio ),
+  #       or_95_ci_upper: Math.exp(log_odds_ratio + 1.96 * se_log_odds_ratio ),
+  #       n_feature_and_show: n_feature_and_show,
+  #       n_feature_and_no_show: n_feature_and_no_show,
+  #       n_show: n_show,
+  #       n_no_show: n_no_show,
+  #       log_odds_ratio: log_odds_ratio,
+  #       se_log_odds_ratio: se_log_odds_ratio,
+  #       or_80_ci_lower: Math.exp(log_odds_ratio - 1.28 * se_log_odds_ratio ),
+  #       or_80_ci_upper: Math.exp(log_odds_ratio + 1.28 * se_log_odds_ratio ),
+  #       # significant: significant
+  #     }
+  #   }.sort_by {|e| e[:feature_name]}
+  #
+  # end
   
     
   def self.extract_clinic_sessions( encounters )
