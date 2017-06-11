@@ -1,10 +1,10 @@
 require "csv"
-require "../filters.rb"
+require "./filters.rb"
 # create a subset of a data file for faster development and testing
 
 # # =============================================================================
 # # ===============================  parameters  ================================
-root = "../neurology_provider_visits_with_payer_20170608"
+root = "neurology_provider_visits_with_payer_20170608"
 n_to_keep = 1000
 
 
@@ -25,7 +25,7 @@ content = File.read(input_file)
 # @encounters_all = CSV.read(input_file, {headers: true})
 
 # puts "  There are #{ @encounters_all.size } records"
-headers = Hash[@encounters_all.first].keys
+headers = @encounters_all.first.collect {|a,b| a}
 
 
 n_saved = 0
@@ -37,7 +37,7 @@ CSV.open("#{ output_file }", "wb") do |csv_out|
     item = Hash[row]
     # raise item.inspect
     if [item].type_office_followup.any?
-      csv_out << item.values 
+      csv_out << row.collect {|a,b| b} 
       n_saved += 1
       puts "Saved #{n_saved}" if n_saved % 100 == 0
     end

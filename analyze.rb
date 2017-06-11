@@ -3,6 +3,74 @@ module Analyze
   require "csv"
   require 'yaml'
   
+
+   def self.get_logistic_coefficients_from_classifier( classifier, training_instances )
+      require 'weka'
+      import 'weka.filters.unsupervised.attribute.RemoveUseless'
+      java_import 'weka.filters.Filter'
+
+      coeffs = classifier.coefficients.collect {|e| e.collect {|f| f.to_f} }
+
+      logit_filter = RemoveUseless.new 
+      logit_filter.setInputFormat training_instances
+      logit_filtered = Filter.useFilter(training_instances, logit_filter) # class instances
+
+
+      # java_array = classifier.coefficients.to_a #converting java array to ruby
+      # coeffs = java_array.map(&:to_a) #converting second level of java array to ruby
+      # puts logit_filtered.inspect
+      attr_val_pairs = logit_filtered.attributes.collect {|attr| 
+      vals = attr.enumerateValues.collect {|f| f}
+      (vals.size == 2 ? [vals.last] : vals).collect {|f| [attr.name, f]}
+      }.flatten(1)
+
+
+      raise "Error: there are #{ coeffs.size } coefficients and #{ attr_val_pairs.size } attr_val_pairs" unless coeffs.size == (attr_val_pairs.size + 1)
+
+      table_unflattened = ([["Intercept", ""]] + attr_val_pairs).zip( coeffs.collect(&:first) )
+
+      table = table_unflattened.collect {|e| e.flatten}
+
+   end
+  
+  def self.load_and_extract_features_from_encounters_file( input_file_root, indexes=nil)
+     features = Array.new
+     n_read = 0
+     CSV.foreach( "#{ input_file_root }.csv", headers: true ) do |row|
+  
+       if indexes.nil? or indexes.include?( n_read )
+         item = Hash[row]
+         Analyze.parse_timestamps( [item] )
+         Analyze.extract_features( [item] )
+         features << item["features"]
+
+       end
+       n_read += 1
+     end
+     features
+     
+  end
+  
+  def self.add_instances_from_encounters_array( features_array, instances )
+     feature_names = instances.attributes.collect {|e| e.name }
+     
+     # puts "Make sure these features are correct"
+     # instances.attributes.each {|e| puts "  #{e.name} has options #{e.values}" }
+
+     data = features_array.collect do |feature_hash|
+       # because many of the features fields are sparsely encoded, we fill in nils with zero
+       feature_names.collect {|feature_name| x=feature_hash[feature_name] }
+     end
+
+     
+     instances.add_instances(data ) # , weight: 2.0
+     
+
+     
+     instances
+   end
+
+
   def self.confirm(prompt = 'Continue?' )
     puts prompt
 
@@ -14,27 +82,34 @@ module Analyze
   end
   
   def self.output_characteristics( root, suffix="characteristics" )
-     output_hash = {}
+     puts "Extracting and saving data set characteristics"
      
-     CSV.foreach( "#{ root }.csv", headers: true) do |row|
-        row.each do |k,v|
-           output_hash[k] ||= []
-           output_hash[k].push( v) unless output_hash[k].size > 20 or output_hash[k].include?(v)
+     check_overwrite( "#{root}_#{suffix}.yml" ) do
+        output_hash = {}
+     
+        CSV.foreach( "#{ root }.csv", headers: true) do |row|
+           row.each do |k,v|
+              output_hash[k] ||= []
+              output_hash[k].push( v) unless output_hash[k].size > 20 or output_hash[k].include?(v)
+           end
         end
+     
+        puts output_hash.inspect
+     
+        File.open("#{ root}_#{ suffix}.yml", 'w') {|f| f.write output_hash.to_yaml } #Store
      end
-     
-     puts output_hash.inspect
-     
-     File.open("#{ root}_#{ suffix}.yml", 'w') {|f| f.write output_hash.to_yaml } #Store
   end
   
   def self.resave_sample( n_to_sample, root, suffix="samp" )
      puts "Taking a sample of the data"
-     n_rows = 0
-     CSV.foreach( "#{ root }.csv", headers: true) { n_rows += 1}
-     keep = (0...n_rows).to_a.sample(n_to_sample)
+     check_overwrite( "#{root}_#{suffix}.csv" ) do
      
-    resave_if( lambda {|item, i, s| keep.include?(i)}, root, suffix) 
+       n_rows = 0
+       CSV.foreach( "#{ root }.csv", headers: true) { n_rows += 1}
+       keep = (0...n_rows).to_a.sample(n_to_sample)
+     
+       resave_if( lambda {|item, i, s| keep.include?(i)}, root, suffix) 
+    end
   end
      
      
@@ -42,26 +117,34 @@ module Analyze
      resave_if( lambda {|item, i, s| [item].type_office_followup.any?}, root, suffix)
   end
   
+  def self.check_overwrite( output_file )
+     if !File.exists?( output_file ) or confirm("  Warning: Overwrite #{ output_file }?")
+        yield
+     end
+  end
   
-  def self.resave_without_dup( root, suffix="fu" )
-      contents = File.read( "#{ root }.csv" )
-      csv_obj = CSV.new( contents, headers: true)
+  
+  def self.resave_without_dup( root, suffix="fu", uniqueness= nil )
+     uniqueness ||= lambda {|e| "#{ e["Appt Status"]}|#{ e["MRN"]}|#{e["Appt. Time"]}|#{ e["Appt. Length"] }|#{ e["Visit Type"] }"}
      
-      # raise csv_obj.inspect
-      rows_and_unique_key = Array.new
+      output_file = "#{ root }_#{ suffix }.csv"
+      check_overwrite( output_file ) do
+         
+         contents = File.read( "#{ root }.csv" )
+         csv_obj = CSV.new( contents, headers: true)
+     
+         # raise csv_obj.inspect
+         rows_and_unique_key = Array.new
 
-      csv_obj.each_with_index do |csv_row, i|
-         if csv_row["Appt Status"] == "Completed"
-            rows_and_unique_key << [i, "#{ csv_row["MRN"]}|#{csv_row["Appt. Time"]}|#{ csv_row["Appt. Length"] }|#{ csv_row["Visit Type"] }"]
-         else
-            rows_and_unique_key << [i, i] # automatically keep all of these
+         csv_obj.each_with_index do |csv_row, i|
+            rows_and_unique_key << [i, uniqueness.call( csv_row ) ]
          end
+
+         keepers = rows_and_unique_key.uniq {|a, b| b}.collect {|a,b| a}
+         puts "  Duplicate-removal would reduce from #{ rows_and_unique_key.size } to #{ keepers.size } rows"
+
+         resave_if( lambda {|item, i, s| keepers.include?(i)}, root, suffix)
       end
-
-      keepers = rows_and_unique_key.uniq {|a, b| b}.collect {|a,b| a}
-      puts "  Duplicate-removal would reduce from #{ rows_and_unique_key.size } to #{ keepers.size } rows"
-
-      resave_if( lambda {|item, i, s| keepers.include?(i)}, root, suffix)
   end
   
   
@@ -98,14 +181,14 @@ module Analyze
     end
   end
   
-  
+  def self.distance_by_zip
+      puts "  Loading zip code data" unless @distance_by_zip
+      @distance_by_zip ||= Hash[CSV.read("zipcode_distances_from_19104.csv", {headers: true}).collect {|e| [e["ZIP"], e["DIST_KM"].to_f]}]
+  end
   
   def self.extract_features( encounters_all )
-    puts "Extracting features"
+    puts "Extracting features" unless encounters_all.size < 2
 
-    puts "  Loading zip code data"
-    distance_by_zip = Hash[CSV.read("zipcode_distances_from_19104.csv", {headers: true}).collect {|e| [e["ZIP"], e["DIST_KM"].to_f]}]
-    puts "    Loaded"
 
     # in order to find specific patient's prior encounters
     encounters_by_mrn = encounters_all.group_by {|e| e["MRN"]}
@@ -122,34 +205,29 @@ module Analyze
       zip = e["Zip Code"] ? e["Zip Code"][0..4].rjust(5, "0") : "absent"
       dist = distance_by_zip[ zip ]   # distance from hosp
 
-      # we do a sparse encoding -- anything not listed in features is assumed to be 0
-
       e["features"] = {
         "dist_km" => Analyze.categorize_continuous_variable_log(dist, 2, 4, 0, 1024),
         "age_decade" => Analyze.categorize_continuous_variable( e["Age at Encounter"].to_i, 10, 3, 10, 90),
         # "zip_#{ zip }" => 1,
         "gender" => e["Gender"].downcase == "male" ? "male" : "female",
-        "appt_made_#{ Analyze.categorize_continuous_variable_log(e["appt_booked_on"] ? (e["appt_at"] - e["appt_booked_on"] + 1) : nil, 2, 4, 0, 256 )  }d_advance" => 1,
+        "appt_made_d_advance" =>  Analyze.categorize_continuous_variable_log(e["appt_booked_on"] ? (e["appt_at"] - e["appt_booked_on"] + 1) : nil, 2, 4, 0, 256 ) ,
         "dept" => e["Department"].downcase.gsub(" ", "_"),
         "appt_hour" => e["appt_at"].hour.to_s.rjust(2, "0"),
         "appt_type" => e["Visit Type"].downcase,
         "prior_show_past_2yr" =>  n_prior_encounters_show,
         "prior_no_show_past_2yr" => n_prior_encounters_no_show,
         "prior_cancellations_past_2yr" => n_prior_encounters_cancelled,
-        # "prior_show_past_2yr_#{ n_prior_encounters_show.to_s.rjust(2, "0") }" => 1,
-        # "prior_no_show_past_2yr_#{ n_prior_encounters_no_show.to_s.rjust(2, "0") }" => 1,
-        # "prior_cancellations_past_2yr_#{ n_prior_encounters_cancelled.to_s.rjust(2, "0") }" => 1,
         "outcome" => [e].status_no_show.any? ? "no_show" : ([e].status_completed.any? ? "show" : nil)
       }.select {|k,v| v!=nil }
 
     }
-    puts "  done"
+    # puts "  done"
     encounters_all
   end
   
   
   def self.parse_timestamps( encounters_all, timeslot_size = 15 )
-    puts "Parsing timestamps"
+    puts "Parsing timestamps" unless encounters_all.size < 2
     encounters_all.each {|e| 
       e["appt_at"] = DateTime.strptime(e["Appt. Time"], ' %m/%d/%Y  %H:%M ')
       e["checkin_time_obj"] = DateTime.strptime(e["Checkin Time"], ' %m/%d/%Y  %H:%M ') if e["Checkin Time"]
@@ -170,7 +248,7 @@ module Analyze
       puts "  Warning: prov has #{ e["Appt. Length"] } min appt but our analysis uses #{ timeslot_size } min timeslots (#{e["timeslots"]})" if (1.0 * e["Appt. Length"].to_i / timeslot_size).to_i != e["timeslots"].size
   
     }
-    puts "  done"
+    puts "  done" unless encounters_all.size < 2
     encounters_all
   end
 
