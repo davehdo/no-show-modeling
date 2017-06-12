@@ -48,15 +48,53 @@ module Analyze
    # ==========================================================================
    # =========================  CSV file manipulators  ========================
  
+   def self.encounters_by_mrn( input_file_root= nil )
+      if @encounters_by_mrn
+         @encounters_by_mrn
+      else
+         raise "  please initialize encounters_by_mrn with data file" if input_file_root.nil?
+         encounters_by_mrn = {}
+         
+         puts "  Assembling a list of prior encounters"
+         CSV.foreach( "#{ input_file_root }.csv", headers: true ) do |row|
+            item = Hash[row]
+            Analyze.parse_timestamps( [item] )
+            if item["MRN"]
+               encounters_by_mrn[ item["MRN"] ] ||= []
+               encounters_by_mrn[ item["MRN"] ].push(
+                  [item["appt_at"], item["Appt Status"]]
+               )
+            else
+               "  *Warning: no MRN"
+            end
+         end
+         @encounters_by_mrn = encounters_by_mrn
+      end
+   end
+   
    def self.load_and_extract_features_from_encounters_file( input_file_root, indexes=nil)
      features = Array.new
      n_read = 0
-     CSV.foreach( "#{ input_file_root }.csv", headers: true ) do |row|
+     
+     encounters_by_mrn( input_file_root )
 
+     puts "  now extracting features"
+     CSV.foreach( "#{ input_file_root }.csv", headers: true ) do |row|
         if indexes.nil? or indexes.include?( n_read )
            item = Hash[row]
            Analyze.parse_timestamps( [item] )
            Analyze.extract_features( [item] )
+           
+           # extract additional features
+           enc = (encounters_by_mrn[ item["MRN"] ] || [])
+              .select {|date, status| date > (item["appt_at"] - 730) and date < item["appt_at"] }
+           
+           item["features"] = item["features"].merge({
+              "prior_show_past_2yr" => (x=enc.count {|date, status| status == "Completed"}) > 5 ? ">5" : x,
+              "prior_noshow_past_2yr" => (x=enc.count {|date, status| status == "No Show"}) > 5 ? ">5" : x,
+              "prior_cancel_past_2yr" => (x=enc.count {|date, status| status == "Canceled"}) > 5 ? ">5" : x,
+           })
+           
            features << item["features"]
         end
         n_read += 1
@@ -193,11 +231,11 @@ module Analyze
 
     encounters_all.each {|e| 
       # features
-      prior_encounters_2_yrs = encounters_by_mrn[e["MRN"]].select {|f| f["appt_at"] > (e["appt_at"] - 730) and f["appt_at"] < e["appt_at"] }
-  
-      n_prior_encounters_show = prior_encounters_2_yrs.status_completed.size
-      n_prior_encounters_no_show = prior_encounters_2_yrs.status_no_show.size
-      n_prior_encounters_cancelled = prior_encounters_2_yrs.status_cancelled.size
+      # prior_encounters_2_yrs = encounters_by_mrn[e["MRN"]].select {|f| f["appt_at"] > (e["appt_at"] - 730) and f["appt_at"] < e["appt_at"] }
+      #
+      # n_prior_encounters_show = prior_encounters_2_yrs.status_completed.size
+      # n_prior_encounters_no_show = prior_encounters_2_yrs.status_no_show.size
+      # n_prior_encounters_cancelled = prior_encounters_2_yrs.status_cancelled.size
   
       zip = e["Zip Code"] ? e["Zip Code"][0..4].rjust(5, "0") : "absent"
       dist = distance_by_zip[ zip ]   # distance from hosp
@@ -221,9 +259,9 @@ module Analyze
         "dept" => e["Department"].downcase.gsub(" ", "_"),
         "appt_hour" => e["appt_at"].hour.to_s.rjust(2, "0"),
         "appt_type" => e["Visit Type"].downcase,
-        "prior_show_past_2yr" =>  n_prior_encounters_show,
-        "prior_no_show_past_2yr" => n_prior_encounters_no_show,
-        "prior_cancellations_past_2yr" => n_prior_encounters_cancelled,
+        # "prior_show_past_2yr" =>  n_prior_encounters_show,
+        # "prior_no_show_past_2yr" => n_prior_encounters_no_show,
+        # "prior_cancellations_past_2yr" => n_prior_encounters_cancelled,
         "outcome" => [e].status_no_show.any? ? "no_show" : ([e].status_completed.any? ? "show" : nil),
         "payer" => benefit_plan_category
       }.select {|k,v| v!=nil }
@@ -321,6 +359,7 @@ module Analyze
       nil
     end
   end
+  
   
   
   def self.assign_odds_ratios( encounters_all, log_odds_ratios_by_feature, outcome_stored_as)  
@@ -427,55 +466,70 @@ module Analyze
   #
   #
   #
-  # def self.train_odds_ratios( encounters_no_show, encounters_completed )
-  #   features_for_no_show = encounters_no_show.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
-  #   features_for_show = encounters_completed.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
-  #
-  #   n_show = encounters_completed.size
-  #   n_no_show = encounters_no_show.size
-  #
-  #   unique_feature_names = (features_for_show.keys + features_for_no_show.keys).uniq
-  #
-  #   feature_statistics_array = unique_feature_names.collect {|feature_name|
-  #     n_feature_and_show = (features_for_show[ feature_name ] || []).count {|k,v| v == 1}
-  #     n_feature_and_no_show = (features_for_no_show[ feature_name ] || []).count {|k,v| v == 1}
-  #
-  #
-  #     # var_odds_ratio = (var_p_feature_given_show * var_p_feature_given_no_show) +
-  #     #   (var_p_feature_given_show * p_feature_given_no_show ** 2) +
-  #     #   (var_p_feature_given_no_show * p_feature_given_show ** 2)
-  #
-  #     # per md-calc https://www.medcalc.org/calc/odds_ratio.php
-  #
-  #     a = n_feature_and_no_show # exposed, bad outcome
-  #     c = n_no_show - n_feature_and_no_show # control, bad outcome
-  #     b = n_feature_and_show # exposed, good outcome
-  #     d = n_show - n_feature_and_show # control, good outcome
-  #
-  #     odds_ratio = 1.0 * a * d / ( b * c)
-  #
-  #     log_odds_ratio = Math.log( odds_ratio ) # base e
-  #     se_log_odds_ratio = Math.sqrt( (1.0 / a) + (1.0 / b) + (1.0 / c) + (1.0 / d))
-  #
-  #     # significant = ((odds_ratio_lower > 1.0) or ( odds_ratio_upper < 1.0))
-  #     {
-  #       feature_name: feature_name,
-  #       odds_ratio_of_no_show: odds_ratio,
-  #       or_95_ci_lower: Math.exp(log_odds_ratio - 1.96 * se_log_odds_ratio ),
-  #       or_95_ci_upper: Math.exp(log_odds_ratio + 1.96 * se_log_odds_ratio ),
-  #       n_feature_and_show: n_feature_and_show,
-  #       n_feature_and_no_show: n_feature_and_no_show,
-  #       n_show: n_show,
-  #       n_no_show: n_no_show,
-  #       log_odds_ratio: log_odds_ratio,
-  #       se_log_odds_ratio: se_log_odds_ratio,
-  #       or_80_ci_lower: Math.exp(log_odds_ratio - 1.28 * se_log_odds_ratio ),
-  #       or_80_ci_upper: Math.exp(log_odds_ratio + 1.28 * se_log_odds_ratio ),
-  #       # significant: significant
-  #     }
-  #   }.sort_by {|e| e[:feature_name]}
-  #
-  # end
+   def self.train_odds_ratios( features_array, outcome = "outcome" )
+     
+      puts "Getting prototype features"
+      features_hash = Hash[features_array.collect {|e| e.to_a}
+        .flatten(1).uniq.group_by {|k,v| k}.collect do |feature_name, all_values|
+           unique_values =  all_values.collect {|k,v| v}.uniq
+
+           [feature_name, unique_values]
+      end]
+
+      raise "There needs to be two types of values for #{ outcome }" unless features_hash[outcome].size == 2
+# features_for_no_show = encounters_no_show.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
+# features_for_show = encounters_completed.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
+      outcome_0 = features_hash[outcome].first
+      n_outcome_0 = features_array.count {|e| e[outcome] == outcome_0 }
+      n_outcome_1 = features_array.size - n_outcome_0
+
+
+
+      feature_statistics_array = features_hash.collect {|feature_name, possible_values|
+         possible_values.collect {|val| 
+
+            n_feature_and_outcome_0 = features_array.count {|e| e[feature_name] == val and e[outcome] == outcome_0 }
+            n_feature_and_outcome_1 = features_array.count {|e| e[feature_name] == val and e[outcome] != outcome_0 }
+
+            # var_odds_ratio = (var_p_feature_given_show * var_p_feature_given_no_show) +
+            #   (var_p_feature_given_show * p_feature_given_no_show ** 2) +
+            #   (var_p_feature_given_no_show * p_feature_given_show ** 2)
+
+            # per md-calc https://www.medcalc.org/calc/odds_ratio.php
+
+            a = n_feature_and_outcome_0 # exposed, bad outcome
+            c = n_outcome_0 - n_feature_and_outcome_0 # control, bad outcome
+            b = n_feature_and_outcome_1 # exposed, good outcome
+            d = n_outcome_1 - n_feature_and_outcome_1 # control, good outcome
+
+            odds_ratio = 1.0 * a * d / ( b * c)
+            log_odds_ratio = Math.log( odds_ratio ) # base e
+            se_log_odds_ratio = Math.sqrt( (1.0 / a) + (1.0 / b) + (1.0 / c) + (1.0 / d))
+            # significant = ((odds_ratio_lower > 1.0) or ( odds_ratio_upper < 1.0))
+            {
+               feature_name: "#{feature_name}=#{val}",
+               odds_ratio_outcome_0: odds_ratio,
+               outcome_0: outcome_0,
+               or_95_ci_lower: Math.exp(log_odds_ratio - 1.96 * se_log_odds_ratio ),
+               or_95_ci_upper: Math.exp(log_odds_ratio + 1.96 * se_log_odds_ratio ),
+               n_feature_and_outcome_0: n_feature_and_outcome_0,
+               n_feature_and_outcome_1: n_feature_and_outcome_1,
+               n_outcome_0: n_outcome_0,
+               n_outcome_1: n_outcome_1,
+               log_odds_ratio: log_odds_ratio,
+               se_log_odds_ratio: se_log_odds_ratio,
+              # or_80_ci_lower: Math.exp(log_odds_ratio - 1.28 * se_log_odds_ratio ),
+              # or_80_ci_upper: Math.exp(log_odds_ratio + 1.28 * se_log_odds_ratio ),
+              # significant: significant
+            }
+         }
+         
+
+
+
+    }.flatten(1).sort_by {|e| e[:feature_name]}
+
+  end
   
     
   def self.extract_clinic_sessions( encounters )
