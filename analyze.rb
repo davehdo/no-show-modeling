@@ -224,20 +224,12 @@ module Analyze
   def self.extract_features( encounters_all )
     puts "Extracting features" unless encounters_all.size < 2
 
-
     # in order to find specific patient's prior encounters
     encounters_by_mrn = encounters_all.group_by {|e| e["MRN"]}
 
-
     encounters_all.each {|e| 
-      # features
-      # prior_encounters_2_yrs = encounters_by_mrn[e["MRN"]].select {|f| f["appt_at"] > (e["appt_at"] - 730) and f["appt_at"] < e["appt_at"] }
-      #
-      # n_prior_encounters_show = prior_encounters_2_yrs.status_completed.size
-      # n_prior_encounters_no_show = prior_encounters_2_yrs.status_no_show.size
-      # n_prior_encounters_cancelled = prior_encounters_2_yrs.status_cancelled.size
   
-      zip = e["Zip Code"] ? e["Zip Code"][0..4].rjust(5, "0") : "absent"
+      zip = e["Zip Code"] ? e["Zip Code"].to_s.strip[0..4].rjust(5, "0") : "absent"
       dist = distance_by_zip[ zip ]   # distance from hosp
 
       if ["", nil].include?(e["Benefit Plan"])
@@ -251,17 +243,15 @@ module Analyze
       end
          
       e["features"] = {
-        "dist_km" => Analyze.categorize_continuous_variable_log(dist, 2, 4, 0, 1024),
-        "age_decade" => Analyze.categorize_continuous_variable( e["Age at Encounter"].to_i, 10, 3, 10, 90),
+        "dist_km" => Analyze.categorize_continuous_var_by_boundaries(dist, (1..10).collect {|n| 2 ** n} ) || "UNKNOWN",
+        "age_decade" => Analyze.categorize_continuous_var_by_boundaries( e["Age at Encounter"].to_i, (10..90).step(10)) || "UNKNOWN",
         # "zip_#{ zip }" => 1,
         "gender" => e["Gender"].downcase == "male" ? "male" : "female",
-        "appt_made_d_advance" =>  Analyze.categorize_continuous_variable_log(e["appt_booked_on"] ? (e["appt_at"] - e["appt_booked_on"] + 1) : nil, 2, 4, 0, 256 ) ,
+        "appt_made_d_advance" =>  Analyze.categorize_continuous_var_by_boundaries(e["appt_booked_on"] ? (e["appt_at"] - e["appt_booked_on"] ) : nil, (1..8).collect {|n| 2 ** n} ) || "UNKNOWN",
         "dept" => e["Department"].downcase.gsub(" ", "_"),
         "appt_hour" => e["appt_at"].hour.to_s.rjust(2, "0"),
         "appt_type" => e["Visit Type"].downcase,
-        # "prior_show_past_2yr" =>  n_prior_encounters_show,
-        # "prior_no_show_past_2yr" => n_prior_encounters_no_show,
-        # "prior_cancellations_past_2yr" => n_prior_encounters_cancelled,
+        "last_contact" =>  Analyze.categorize_continuous_var_by_boundaries(e["contacted_on"] ? (e["appt_at"] - e["contacted_on"]) : nil, (1..8).collect {|n| 2 ** n} ) || "UNKNOWN",
         "outcome" => [e].status_no_show.any? ? "no_show" : ([e].status_completed.any? ? "show" : nil),
         "payer" => benefit_plan_category
       }.select {|k,v| v!=nil }
@@ -279,8 +269,8 @@ module Analyze
       e["checkin_time_obj"] = DateTime.strptime(e["Checkin Time"], ' %m/%d/%Y  %H:%M ') if e["Checkin Time"]
       e["clinic_session"] = "#{ e["Provider"]}|#{ e["appt_at"].strftime("%F|%p") }"
       e["contacted_on"] = DateTime.strptime( e["Contact Date"], " %m/%d/%Y") if e["Contact Date"]
-      # begin
-      #   e["appt_booked_on"] = DateTime.strptime(e["Appt. Booked on"], "%m/%d/%y") if e["Appt. Booked on"]
+      # e.g. # 2015-01-19
+      e["appt_booked_on"] = DateTime.strptime(e["Appt. Booked on"], "%F") if e["Appt. Booked on"]
       #   e["appt_booked_on"] = nil if e["appt_booked_on"] > e["appt_at"]
       # rescue
       #   false
@@ -329,6 +319,34 @@ module Analyze
      end
   end
   
+    #
+  # boundaries = (0..5).collect {|e| 2 ** e }
+  #
+  # puts "boundaries #{ boundaries }"
+  #
+  # [-5, 0.2, 0, 1, 3, 5, 8, 100, 1000, 100000].each do |n|
+  #    puts "#{n} cat as #{ Analyze.categorize_continuous_variable_by_boundaries(n, boundaries) }"
+  # end
+  #
+  #
+  def self.categorize_continuous_var_by_boundaries( var=nil, boundaries_array )
+     
+     
+     sorted = (boundaries_array.class == Enumerator ? boundaries_array.to_a : boundaries_array).clone.sort_by {|e| e}
+     if var == nil
+        nil
+     elsif var < sorted.first
+        "<#{boundaries_array.min}"
+     elsif var >= sorted.last
+        ">=#{boundaries_array.max}"
+     else
+        prior = sorted.shift
+        while !(prior...(current = sorted.shift)).include?( var )
+           prior = current
+        end
+        "#{ prior}...#{current}" 
+     end
+  end
   
   def self.categorize_continuous_variable_log( var=nil, base=10, digits=1, min=nil, max=nil)
     if var and var > 0

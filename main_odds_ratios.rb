@@ -60,12 +60,11 @@ training_fraction = 0.8
 valid_row_indexes = Array.new
 n_read = 0
 CSV.foreach( "#{last_filename_root}.csv", headers: true ) do |row|
-  item = Hash[row]
-  
-  if [item].status_completed.any? or [item].status_no_show.any?
+   item = Hash[row]
+   if [item].status_completed.any? or [item].status_no_show.any?
     valid_row_indexes << n_read
-  end
-  n_read += 1
+   end
+   n_read += 1
 end
 puts "  There are #{ valid_row_indexes.size} valid rows in #{ last_filename_root }"
 
@@ -103,4 +102,4 @@ CSV.open("#{ output_root }_coefficients.csv", "wb") do |csv_out|
       csv_out << headers.collect {|f| e[f] }
    end
 end
-
+puts "Done. Saved as #{ output_root }_coefficients.csv"
