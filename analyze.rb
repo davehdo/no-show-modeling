@@ -7,6 +7,11 @@ module Analyze
    # =========================  Weka-related helpers  =========================
 
    def self.get_logistic_coefficients_from_classifier( classifier, training_instances )
+      # because the intrinsic method for getting coefficients is not labeled
+      # its non-trivial to match it up with the feature its describing
+      # we use a filter to mimic what the training method does, weeding out
+      # non-information-carrying parameters
+      
       require 'weka'
       import 'weka.filters.unsupervised.attribute.RemoveUseless'
       java_import 'weka.filters.Filter'
@@ -48,17 +53,18 @@ module Analyze
    # ==========================================================================
    # =========================  CSV file manipulators  ========================
  
-   def self.encounters_by_mrn( input_file_root= nil )
-      if @encounters_by_mrn
-         @encounters_by_mrn
-      else
+   def self.get_encounters_by_mrn( input_file_root= nil )
+      # if @encounters_by_mrn
+      #    @encounters_by_mrn
+      # else
          raise "  please initialize encounters_by_mrn with data file" if input_file_root.nil?
          encounters_by_mrn = {}
+         earliest_at = nil
          
          puts "  Assembling a list of prior encounters"
-         CSV.foreach( "#{ input_file_root }.csv", headers: true ) do |row|
+         CSV.foreach( "#{ input_file_root }.csv", headers: true) do |row|
             item = Hash[row]
-            Analyze.parse_timestamps( [item] )
+            Analyze.parse_timestamps([item])
             if item["MRN"]
                encounters_by_mrn[ item["MRN"] ] ||= []
                encounters_by_mrn[ item["MRN"] ].push(
@@ -67,34 +73,57 @@ module Analyze
             else
                "  *Warning: no MRN"
             end
+            earliest_at = item["appt_at"] if earliest_at == nil or earliest_at > item["appt_at"]
          end
-         @encounters_by_mrn = encounters_by_mrn
-      end
+         [encounters_by_mrn, earliest_at]
+         # @encounters_by_mrn = encounters_by_mrn
+      # end
    end
    
-   def self.load_and_extract_features_from_encounters_file( input_file_root, indexes=nil)
+   
+   def self.load_and_extract_training_and_test_features_from_encounters_file(last_filename_root, training_fraction = 0.8 )
+      # valid_row_indexes = Array.new
+      n_read = 0
+      CSV.foreach( "#{last_filename_root}.csv", headers: true ) do |row|
+         # item = Hash[row]
+         # if [item].status_completed.any? or [item].status_no_show.any?
+         #  valid_row_indexes << n_read
+         # end
+         n_read += 1
+      end
+      
+      valid_row_indexes = (0..n_read).to_a
+      
+      puts "  There are #{ valid_row_indexes.size} valid rows in #{ last_filename_root }"
+
+      puts "Separating into training and test sets"
+      test_indexes = valid_row_indexes.sample( (valid_row_indexes.size * (1.0 - training_fraction)).round)
+      puts """  There should be #{valid_row_indexes.size - test_indexes.size} training and #{test_indexes.size} test instances"""
+
+      puts "Extracting features for training and test sets"
+      training_features = self.load_features_by_index( last_filename_root, indexes: test_indexes, inverse: true )
+      test_features = self.load_features_by_index( last_filename_root, indexes: test_indexes, inverse: false )
+
+      puts """  Done. Extracted features for #{ training_features.size } training and #{ test_features.size } test instances"""
+      [training_features, test_features]
+   end
+   
+   
+   def self.load_features_by_index( input_file_root, **args) # indexes=nil, inverse=false
+      args[:indexes] ||= nil
+      args[:inverse] ||= false
+      
      features = Array.new
      n_read = 0
-     
-     encounters_by_mrn( input_file_root )
 
-     puts "  now extracting features"
+     puts "  Now extracting features"
      CSV.foreach( "#{ input_file_root }.csv", headers: true ) do |row|
-        if indexes.nil? or indexes.include?( n_read )
+        if args[:indexes].nil? or 
+           (args[:inverse] == false and args[:indexes].include?( n_read )) or 
+           (args[:inverse] == true and !args[:indexes].include?( n_read ))
            item = Hash[row]
            Analyze.parse_timestamps( [item] )
            Analyze.extract_features( [item] )
-           
-           # extract additional features
-           enc = (encounters_by_mrn[ item["MRN"] ] || [])
-              .select {|date, status| date > (item["appt_at"] - 730) and date < item["appt_at"] }
-           
-           item["features"] = item["features"].merge({
-              "prior_show_past_2yr" => (x=enc.count {|date, status| status == "Completed"}) > 5 ? ">5" : x,
-              "prior_noshow_past_2yr" => (x=enc.count {|date, status| status == "No Show"}) > 5 ? ">5" : x,
-              "prior_cancel_past_2yr" => (x=enc.count {|date, status| status == "Canceled"}) > 5 ? ">5" : x,
-           })
-           
            features << item["features"]
         end
         n_read += 1
@@ -111,17 +140,46 @@ module Analyze
   
      puts "  Censor #{ args[:censor] }"
      check_overwrite( "#{root}_#{args[:suffix]}.yml" ) do
-        output_hash = {}
+        
+        output_hash = {:data_set => {}, :range => {}, :example_values => {}}
+        
+        n_rows = 0
+        headers = []
+        
         CSV.foreach( "#{ root }.csv", headers: true) do |row|
+           if n_rows == 0
+              headers = row.collect {|k,v| k}
+           end
+           
            row.each do |k,v|
               v = Analyze.censor(v) if args[:censor].include?(k)
-              output_hash[k] ||= []
-              output_hash[k].push( v) unless output_hash[k].size > 20 or output_hash[k].include?(v)
+              output_hash[:example_values][k] ||= []
+              output_hash[:example_values][k].push( v) unless output_hash[:example_values][k].size > 20 or output_hash[:example_values][k].include?(v)
+              
+              output_hash[:range][k] ||= {}
+              output_hash[:range][k][:min] ||= v.to_s
+              output_hash[:range][k][:max] ||= v.to_s 
+              output_hash[:range][k][:n_blank] ||= 0
+              output_hash[:range][k][:class] ||= []
+              
+              output_hash[:range][k][:min] = v.to_s if v.to_s < output_hash[:range][k][:min] 
+              output_hash[:range][k][:max] = v.to_s if v.to_s > output_hash[:range][k][:max]
+              output_hash[:range][k][:n_blank] += 1 if v == nil
+              output_hash[:range][k][:class].push(v.class.to_s) unless output_hash[:range][k][:class].include?(v.class.to_s)
+              
            end
+           
+           n_rows += 1
         end
   
+        output_hash[:data_set] = {
+           filename: "#{root}_#{args[:suffix] }.yml",
+           n_rows: n_rows,
+           columns: headers
+        }
+        
         puts output_hash.inspect
-        File.open("#{ root}_#{ args[:suffix]}.yml", 'w') {|f| f.write output_hash.to_yaml } #Store
+        File.open("#{ root}_#{ args[:suffix] }.yml", 'w') {|f| f.write output_hash.to_yaml } #Store
      end
    end
   
@@ -208,6 +266,77 @@ module Analyze
       "#{ root }_#{ suffix }"
    end
  
+ 
+   def self.get_list_of_residents( root, **args )
+      # residents typically are the providers whos patients are monday/thurs PM
+      provider = {}
+      
+      CSV.foreach( "#{ root }.csv", headers: true ) do |row|
+         item = Hash[row]
+         Analyze.parse_timestamps( [item] )
+         time_slot_of_interest = ["Thu PM", "Mon PM"].include?(item["appt_at"].strftime("%a %p") )
+         provider[item["Provider"]] ||= [0, 0]
+         provider[item["Provider"]][time_slot_of_interest ? 0 : 1] += 1
+      end
+      
+      puts provider.inspect
+      provider
+   end
+   
+   
+   def self.resave_with_prior_visit_counts( root, **args )
+      puts "Resaving each with a "
+      args[:suffix] ||= "counts"
+     
+      input_file = "#{ root }"
+      output_file = "#{ root }_#{ args[:suffix] }"
+
+      check_overwrite( "#{output_file}.csv" ) do
+        n_read = 0
+        features = Array.new
+        encounters_by_mrn, earliest_at = get_encounters_by_mrn( root )
+        
+        CSV.open("#{ output_file }.csv", "wb") do |csv_out|
+
+           CSV.foreach( "#{ input_file }.csv", headers: true ) do |row|
+              if n_read == 0
+                 headers = row.collect {|a,b| a}
+                 csv_out << headers + ["prior_show_past_2yr", "prior_noshow_past_2yr", "prior_cancel_past_2yr"]
+              end
+
+              item = Hash[row]
+              Analyze.parse_timestamps( [item] )
+              
+              # =======================  prior counts  ========================
+              if earliest_at + 730 > item["appt_at"]
+                 counts = [nil, nil, nil]
+              else
+                 # extract additional features
+                 enc = (encounters_by_mrn[ item["MRN"] ] || [])
+                    .select {|date, status| date > (item["appt_at"] - 730) and date < item["appt_at"] }
+      
+                 counts = [                    
+                    (x=enc.count {|date, status| status == "Completed"}) > 5 ? ">5" : x,
+                    (x=enc.count {|date, status| status == "No Show"}) > 5 ? ">5" : x,
+                    (x=enc.count {|date, status| status == "Canceled"}) > 5 ? ">5" : x
+                 ]
+              end
+              
+              # =========================  attg/res  ==========================
+              
+              
+              csv_out << row.collect {|a,b| b} + counts
+              
+              puts "  #{ n_read}" if n_read % 2000 == 0
+     
+              n_read += 1
+           end
+        end
+     end
+     output_file
+   end
+  
+
   
    # ==========================================================================
    # ==========================================================================
@@ -245,7 +374,7 @@ module Analyze
       e["features"] = {
         "dist_km" => Analyze.categorize_continuous_var_by_boundaries(dist, (1..10).collect {|n| 2 ** n} ) || "UNKNOWN",
         "age_decade" => Analyze.categorize_continuous_var_by_boundaries( e["Age at Encounter"].to_i, (10..90).step(10)) || "UNKNOWN",
-        # "zip_#{ zip }" => 1,
+        "zip_code" => zip,
         "gender" => e["Gender"].downcase == "male" ? "male" : "female",
         "appt_made_d_advance" =>  Analyze.categorize_continuous_var_by_boundaries(e["appt_booked_on"] ? (e["appt_at"] - e["appt_booked_on"] ) : nil, (1..8).collect {|n| 2 ** n} ) || "UNKNOWN",
         "dept" => e["Department"].downcase.gsub(" ", "_"),
@@ -253,7 +382,12 @@ module Analyze
         "appt_type" => e["Visit Type"].downcase,
         "last_contact" =>  Analyze.categorize_continuous_var_by_boundaries(e["contacted_on"] ? (e["appt_at"] - e["contacted_on"]) : nil, (1..8).collect {|n| 2 ** n} ) || "UNKNOWN",
         "outcome" => [e].status_no_show.any? ? "no_show" : ([e].status_completed.any? ? "show" : nil),
-        "payer" => benefit_plan_category
+        "payer" => benefit_plan_category, 
+        "prior_show_past_2yr" => e["prior_show_past_2yr"],
+        "prior_noshow_past_2yr" => e["prior_noshow_past_2yr"],
+        "prior_cancel_past_2yr" => e["prior_cancel_past_2yr"],
+        "session" => e["appt_at"].strftime("%a %p"),
+        "provider" => e["Provider"]
       }.select {|k,v| v!=nil }
 
     }
@@ -330,8 +464,6 @@ module Analyze
   #
   #
   def self.categorize_continuous_var_by_boundaries( var=nil, boundaries_array )
-     
-     
      sorted = (boundaries_array.class == Enumerator ? boundaries_array.to_a : boundaries_array).clone.sort_by {|e| e}
      if var == nil
         nil
@@ -400,8 +532,6 @@ module Analyze
     }
   end
 
-
-  
   
   def self.validate_model( test_no_show, test_show, outcome_stored_as)
     squares = test_no_show.collect {|e| (1.0 - e[outcome_stored_as]) ** 2 } + 
@@ -501,8 +631,6 @@ module Analyze
       n_outcome_0 = features_array.count {|e| e[outcome] == outcome_0 }
       n_outcome_1 = features_array.size - n_outcome_0
 
-
-
       feature_statistics_array = features_hash.collect {|feature_name, possible_values|
          possible_values.collect {|val| 
 
@@ -541,9 +669,6 @@ module Analyze
               # significant: significant
             }
          }
-         
-
-
 
     }.flatten(1).sort_by {|e| e[:feature_name]}
 

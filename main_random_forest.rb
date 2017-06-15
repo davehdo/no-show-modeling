@@ -28,8 +28,11 @@ input_root = "neurology_provider_visits_with_payer_20170608"
 output_root = "random_forest_classifier"
 
 # ======================  Step 1 : keep only follow ups  ======================
-last_filename_root = Analyze.resave_if( lambda {|item, i, s| [item]
-   .type_office_followup.loc_south_pav.any?}, input_root, "fu_sopa")
+last_filename_root = Analyze.resave_with_prior_visit_counts( input_root )
+
+last_filename_root = Analyze.resave_if( lambda {|item, i, s| 
+   [item].type_office_followup.loc_south_pav.any? and ([item].status_completed.any? or [item].status_no_show.any?)
+}, last_filename_root, "fu_sopa")
 
 # =========================  Step 2 : eliminate dup  ==========================
 # amongst completed encounters, eliminate the duplicate encounters associated 
@@ -53,39 +56,10 @@ Analyze.output_characteristics( last_filename_root,
 
 
 # =============================================================================
-# ======================   load training and test sets   ======================
-
-training_fraction = 0.8
-
-valid_row_indexes = Array.new
-n_read = 0
-CSV.foreach( "#{last_filename_root}.csv", headers: true ) do |row|
-  item = Hash[row]
-  
-  if [item].status_completed.any? or [item].status_no_show.any?
-    valid_row_indexes << n_read
-  end
-  n_read += 1
-end
-puts "  There are #{ valid_row_indexes.size} valid rows in #{ last_filename_root }"
-
-puts "Separating into training and test sets"
-training_indexes = valid_row_indexes.sample( (valid_row_indexes.size * training_fraction).round)
-test_indexes = valid_row_indexes - training_indexes
-puts """  There should be #{training_indexes.size} training and 
-#{test_indexes.size} test instances"""
-
-
-# =============================================================================
 # ===========================   extract features   ============================
 
-puts "Extracting features for training and test sets"
-training_features = Analyze.load_and_extract_features_from_encounters_file( last_filename_root, training_indexes )
-test_features = Analyze.load_and_extract_features_from_encounters_file( last_filename_root, test_indexes )
-
-puts """  Done. Extracted features for #{ training_features.size } training and
-#{ test_features.size } test instances"""
-
+training_fraction = 0.8
+training_features, test_features = Analyze.load_and_extract_training_and_test_features_from_encounters_file(last_filename_root, training_fraction )
 
 puts "Getting prototype features"
 features_hash = (training_features + test_features).collect {|e| e.to_a}
@@ -147,9 +121,12 @@ classifier = Weka::Classifiers::Trees::RandomForest.new
 # classifier = Weka::Classifiers::Bayes::NaiveBayes.new
 # classifier = Weka::Classifiers::Functions::Logistic.new # 0.2978 RMS error
 # classifier.use_options('-I 200 -K 5')
+# classifier.use_options('-J-Xmx1000M')
 classifier.train_with_instances(training_instances)
 puts "  Done"
 
+# Error: Your application used more memory than the safety cap of 500M.
+# Specify -J-Xmx####M to increase it (#### = cap size in MB).
 
 
 
@@ -188,14 +165,14 @@ test_features: #{ test_features.size }
 
 # coefficients = Analyze.get_logistic_coefficients_from_classifier( classifier, training_instances )
 
-coefficients = classifier.getConditionalEstimators
+# coefficients = classifier.getConditionalEstimators
 
-puts coefficients.inspect
-
-CSV.open("#{ output_root }_coefficients.csv", "wb") do |csv_out|
-   csv_out << ["key", "value", "coefficient"]
-   coefficients.each do |e|
-      csv_out << e
-   end
-end
-
+# puts coefficients.inspect
+#
+# CSV.open("#{ output_root }_coefficients.csv", "wb") do |csv_out|
+#    csv_out << ["key", "value", "coefficient"]
+#    coefficients.each do |e|
+#       csv_out << e
+#    end
+# end
+#
