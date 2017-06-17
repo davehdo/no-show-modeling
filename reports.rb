@@ -2,6 +2,10 @@ class Reports
 
   require "./filters.rb"
   
+  def self.friendly_filename( input_string )
+    input_string.gsub(/[^0-9A-Za-z.\-]+/, '_').downcase
+  end
+  
   def self.progressbar(fraction, label = true, size = 35, char = "x")
     statistics = {mean: fraction}
     
@@ -118,7 +122,41 @@ Validation was performed at RMS error of #{ rms_error }
 """
   end
   
-  
+
+
+  def self.session_details( clinic_sessions )
+    # clinic_sessions = Analyze.extract_clinic_sessions( selected_entries )
+    # dates = selected_entries.collect {|e| e["appt_at"]}
+    # data_date_range = dates.min..dates.max
+    #
+    # squares = selected_entries.status_no_show.collect {|e| (1.0 - e[:prob_no_show]) ** 2 } +
+    #   selected_entries.status_completed.collect {|e| (0.0 - e[:prob_no_show]) ** 2 }
+    #
+    # rms_error = Math.sqrt(squares.mean)
+
+    
+    
+"""Clinic Session Details
+Provider(s): #{  }
+Report dates: #{  }
+
+
+
+#{
+
+    clinic_sessions.collect do |clinic_session|
+        "#{ clinic_session[:id].gsub(/\|/, "  ") } / #{ (clinic_session[:encounters].status_completed + clinic_session[:encounters].status_no_show + clinic_session[:encounters].status_scheduled).sum_minutes / 60.0 } pt-hrs booked over #{ clinic_session[:hours_booked]} hrs\n" +
+
+        clinic_session[:encounters].group_by {|e| e["appt_at"].strftime("%H:%M") }.collect do |time, entries_for_time|
+          entries_text = entries_for_time.collect {|e| "#{ e["Patient Name"]} #{ e["Visit Type"]} (#{ e["Appt Status"]} #{e["Appt. Length"]}) #{ e["Total Amount"] } b#{ e["Appt. Booked on"]} c#{ e["Contact Date"]}" }.join(" / ")
+          "    #{ time }  #{ entries_text }"
+        end.join("\n")
+
+    end.join("\n")
+}
+"""
+  end
+    
   def self.sessions( selected_entries, clinic_sessions )
     # entries_by_month = entries_all.group_by {|e| e["POST_MONTH"]}.sort_by {|m, t| "#{m}"}
     dates = selected_entries.collect {|e| e["appt_at"]}
@@ -129,41 +167,44 @@ Validation was performed at RMS error of #{ rms_error }
     # =============================================================================
     # =========================   timeslots analysis  =============================
 
-
-
-
-
+    goal_n_sessions_yr = 52 - 4
+    report_n_days = dates.max - dates.min
+    month_strings = data_date_range.to_a.collect {|e| e.strftime("%Y-%m") }.uniq
+    clinic_sessions_by_month = clinic_sessions.group_by {|e| e[:date].strftime("%Y-%m")}
+    month_strings.each do |month_string|
+       clinic_sessions_by_month[month_string] ||= []
+    end
     
-"""
-Sessions Report
+    clinic_sessions_by_month = clinic_sessions_by_month.sort_by {|m, es| m}
+    
+"""Sessions Report
 Provider(s): #{ selected_entries.providers.uniq.join(" / ") }
 Report dates: #{ data_date_range.min.strftime("%F") } - #{ data_date_range.max.strftime("%F") }
+Report generated: #{ Time.now.strftime("%F") }
 
 ===============================================================================
 ============================== Summary Report =================================
 
 1. Clinic Sessions
 - Helps determine if you are on track
-- Full sessions are defined as half-days with 2 or more hours of patients booked
+- Full sessions are defined as half-days with 1.5 or more hours of patients booked
 
 #{
-  print_table([["Month", "Full sessions", "Partial sessions", "Scheduled sessions" ]] +
-  clinic_sessions.group_by {|e| e[:date].strftime("%m/%Y")}.collect {|month, entries_for_month|
+  print_table([["Month", "Full sessions", "Partial sessions"]] +
+  clinic_sessions_by_month.collect {|month, entries_for_month|
       [month, 
-        entries_for_month.count {|e| e[:is_full_session] and !e[:is_future_session]}, 
-        entries_for_month.count {|e| !e[:is_full_session] and !e[:is_future_session]}, 
-        entries_for_month.count {|e| e[:is_future_session]}, 
+        entries_for_month.count {|e| !e[:is_partial_session] }, 
+        entries_for_month.count {|e| e[:is_partial_session] }
       ]
   } + [[
     "SUM",
-    n_completed = clinic_sessions.count {|e| e[:is_full_session] and !e[:is_future_session]}, 
-    n_partial = clinic_sessions.count {|e| !e[:is_full_session] and !e[:is_future_session]}, 
-    n_scheduled = clinic_sessions.count {|e| e[:is_future_session]}, 
+    n_completed = clinic_sessions.count {|e| e[:is_partial_session] }, 
+    n_partial = clinic_sessions.count {|e| !e[:is_partial_session] }
   ]])
 }
 
 ---
-Projected entire FY 2017: #{n_completed + n_scheduled} sessions (Goal *** sessions)
+Goal #{ (goal_n_sessions_yr / 365.0 * report_n_days ).round} complete sessions during this timeframe
 
 
 2. Hours of patients booked for each clinic session
@@ -184,9 +225,8 @@ Projected entire FY 2017: #{n_completed + n_scheduled} sessions (Goal *** sessio
 
 
 3. Percent of timeslots booked, amongst full sessions 
-- Full sessions are defined as half-days with 2 or more hours of patients booked
 - 100% booking is defined as 4 hours of patient care
-- Omits sessions with <2hrs of patients
+- Omits partial sessions (those with < 1.5 hrs of patients booked)
 - Cancellation does not count as a booked patient, even though late cancellations are 
   practically like no-shows
 - Method 1 counts the total minute-value of encounters where status is complete or 
@@ -196,10 +236,10 @@ Projected entire FY 2017: #{n_completed + n_scheduled} sessions (Goal *** sessio
   cannot exceed 100% and does not give credit for doublebooked patients
  
 #{
-  complete_sessions = clinic_sessions.select {|e| e[:is_full_session] and !e[:is_future_session]}  
+  complete_sessions = clinic_sessions.select {|e| !e[:is_partial_session] and !e[:is_future_session]}  
   
-  print_table([["Month", "% booked (method 1)", "% booked (method 2)" ]] +
-  clinic_sessions.group_by {|e| e[:date].strftime("%m/%Y")}.collect {|month, full_sessions_for_month|
+  print_table([["Month", "% booked (patient-hours)", "% booked (timeslots filled)" ]] +
+  clinic_sessions_by_month.collect {|month, full_sessions_for_month|
 
       num = full_sessions_for_month.collect {|e| e[:hours_booked]}.compact.sum
       num2 = full_sessions_for_month.collect {|e| e[:visual].count(".") + e[:visual].count("X")}.compact.sum * 0.25 # hours
@@ -229,10 +269,10 @@ Overall  #{
   occasionally, entire clinic sessions are cancelled by provider.
 
 #{
-  complete_sessions = clinic_sessions.select {|e| e[:is_full_session] and !e[:is_future_session]}  
+  complete_sessions = clinic_sessions.select {|e| !e[:is_partial_session] and !e[:is_future_session]}  
 
-  print_table([["Month", "Hours", "% of clinic time" ]] +
-  clinic_sessions.group_by {|e| e[:date].strftime("%m/%Y")}.collect {|month, full_sessions_for_month|
+  print_table([["Month", "Hours", "% of clinic timeslots" ]] +
+  clinic_sessions_by_month.collect {|month, full_sessions_for_month|
 
       # count the number of Os which are each 15 min of cancellation-not-rebooked
       num = full_sessions_for_month.collect {|e| e[:visual].count("O")}.compact.sum * 0.25 # hours
@@ -257,7 +297,7 @@ Overall  #{
 5. Show rate (% Patients arrived, given booked)
 #{
   print_table([["Month", "% showed" ]] +
-  clinic_sessions.group_by {|e| e[:date].strftime("%m/%Y")}.collect {|month, sessions_for_month|
+  clinic_sessions_by_month.collect {|month, sessions_for_month|
       encounters_for_month = sessions_for_month.collect {|e| e[:encounters]}.flatten
       
       n_show = encounters_for_month.status_completed.size
