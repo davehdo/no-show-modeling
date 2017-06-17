@@ -133,6 +133,29 @@ module Analyze
    end
 
 
+   def self.load_if( lambda_par, input_file_root, **args)
+      entries = Array.new
+      n_read = 0
+      n_saved = 0
+      puts "  Now loading relevant entries from file"
+      CSV.foreach( "#{ input_file_root }.csv", headers: true ) do |row|
+         item = Hash[row]
+         
+         Analyze.parse_timestamps( [item] )
+         # Analyze.extract_features( [item] )
+
+         if lambda_par.call(item)
+            entries << item
+            n_saved += 1
+         end
+
+         n_read += 1
+         puts "  #{ n_read}" if n_read % 10000 == 0
+      end
+      entries
+   end
+   
+   
    def self.output_characteristics( root, **args )
      puts "Extracting and saving data set characteristics"
      args[:suffix] ||= "characteristics"
@@ -411,10 +434,10 @@ module Analyze
       # end
     
       # e.g. timeslot   KIMBARIS, GRACE CHEN|2014-09-18|13:15
-      # e["timeslots"] = (0...(e["Appt. Length"].to_i)).step(timeslot_size).collect {|interval|
-      #   timeslot = e["appt_at"] + (interval / 24.0 / 60.0)
-      #   "#{ e["Provider"]}|#{ timeslot.strftime("%F|%H:%M") }"
-      # }
+      e["timeslots"] = (0...(e["Appt. Length"].to_i)).step(timeslot_size).collect {|interval|
+        timeslot = e["appt_at"] + (interval / 24.0 / 60.0)
+        "#{ e["Provider"]}|#{ timeslot.strftime("%F|%H:%M") }"
+      }
       # puts "  Warning: prov has #{ e["Appt. Length"] } min appt but our analysis uses #{ timeslot_size } min timeslots (#{e["timeslots"]})" if (1.0 * e["Appt. Length"].to_i / timeslot_size).to_i != e["timeslots"].size
   
     }
@@ -676,7 +699,7 @@ module Analyze
   
     
   def self.extract_clinic_sessions( encounters )
-    clinic_sessions = encounters.group_by {|e| e["clinic_session"]}.collect {|session_id, encounters_in_session|
+    clinic_sessions = encounters.group_by {|e| e["clinic_session"]}.sort_by {|k,v|k}.collect {|session_id, encounters_in_session|
   
       parts = session_id.split("|") # [provider, date, am/pm]
       start_hour = parts[2] == "AM" ? 8 : 13
@@ -691,7 +714,7 @@ module Analyze
       timeslots_cancelled = encounters_in_session.status_cancelled.collect {|e| e["timeslots"] }.flatten.uniq
       timeslots_scheduled = encounters_in_session.status_scheduled.collect {|e| e["timeslots"] }.flatten.uniq
       timeslots_other = encounters_in_session.collect {|e| e["timeslots"] }.flatten.uniq - 
-      timeslots_scheduled - timeslots_completed - timeslots_no_show - timeslots_cancelled
+         timeslots_scheduled - timeslots_completed - timeslots_no_show - timeslots_cancelled
     
       visual = timeslots.collect {|timeslot|
         if timeslots_completed.include?( timeslot )
@@ -709,6 +732,7 @@ module Analyze
         end
       }.join("")
 
+      hours_booked = ((encounters_in_session.status_completed + encounters_in_session.status_no_show + encounters_in_session.status_scheduled).sum_minutes || 0) / 60.0
   
       {
         id: session_id, 
@@ -716,10 +740,10 @@ module Analyze
         provider: parts[0],
         date: Date.parse( parts[1] ),
         am_pm: parts[2],
-        encounters: encounters_in_session,
-        hours_booked: ((encounters_in_session.status_completed + encounters_in_session.status_no_show + encounters_in_session.status_scheduled).sum_minutes || 0) / 60.0,
+        encounters: encounters_in_session.sort_by {|f| f["appt_at"]},
+        hours_booked: hours_booked,
         hours_completed: ((encounters_in_session.status_completed ).sum_minutes || 0) / 60.0,
-        is_full_session: ((encounters_in_session.status_completed + encounters_in_session.status_no_show + encounters_in_session.status_scheduled).sum_minutes || 0) >= 120,
+        is_partial_session: hours_booked < 1.5,
         is_future_session: ((encounters_in_session.status_scheduled ).sum_minutes || 0) >= 30,
         visual: visual,
       }
