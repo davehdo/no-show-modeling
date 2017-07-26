@@ -59,7 +59,7 @@ Analyze.output_characteristics( last_filename_root,
 
 training_fraction = 0.8
 
-training_features, test_features = Analyze.load_and_extract_training_and_test_features_from_encounters_file(last_filename_root, training_fraction )
+training_features, test_features = Analyze.extract_training_and_test_features_from_file(last_filename_root, training_fraction )
 
 # =============================================================================
 # ========================   assembling into instances   ======================

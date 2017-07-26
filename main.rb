@@ -20,12 +20,11 @@ require "./analyze.rb"
 # require 'yaml'
 # require 'statsample' # if cannot find statssample; run gem install statsample
 
+
 # =============================================================================
 # ===============================  parameters  ================================
-input_file = "neurologyvisitsjuly2014-november2017_truncated.csv"
+
 timeslot_size = 15 # minutes
-
-
 provider_grouping_filename = "provider_groupings.csv"
 last_filename_root = input_root = "neurology_provider_visits_with_payer_20170608"
 output_root = "report"
@@ -37,9 +36,16 @@ output_root = "report"
 
 
 # =====================  Step 3 : Filter rows of interest  ====================
-last_filename_root = Analyze.resave_if( lambda {|item, i, s| 
-   [item].type_office_followup.loc_south_pav.any? }, last_filename_root, "sopa")
+# last_filename_root = Analyze.resave_if( lambda {|item, i, s|
+   # [item].type_office_followup.loc_south_pav.any? }, last_filename_root, "sopa")
 
+last_filename_root = Analyze.resave_if( lambda {|item, i, s|
+      item["appt_at"] > DateTime.new(2016, 7, 1) and 
+      item["appt_at"] < DateTime.new(2017, 8, 1)
+   }, last_filename_root, "12mo")
+
+
+         
 # ======================  Step 4 : eliminate duplicates  ======================
 # amongst completed encounters, eliminate the duplicate encounters associated 
 # with Botox and EMG so we don't overcount minutes of patients seen
@@ -124,20 +130,20 @@ provider_groupings = provider_groupings_by_name.values
 
 
 
-def generate_and_save_sessions_report( provider, encounters, custom_filename = nil) #
+def generate_and_save_sessions_report( provider, encounters, custom_filename = nil, params={}) #
   raise "no entries" if encounters.size == 0
   puts "Producing report..."
   clinic_sessions = Analyze.extract_clinic_sessions( encounters )
 
   friendly = Reports.friendly_filename( custom_filename || provider )
-  filename_complete = "report_billing_#{friendly}_#{ Time.now.strftime("%F") }.txt"
+  filename_complete = "report_billing_#{friendly}_#{ Time.now.strftime("%F") }.html"
 
   File.open(filename_complete , "w:UTF-8") do |file|
-    file.write(Reports.sessions(encounters, clinic_sessions ).gsub("\n", "\r\n"))
+    file.write(Reports.session_efficiency(encounters, clinic_sessions, params).gsub("\n", "\r\n"))
   end
   puts "  Saved as #{ filename_complete }"
 
-  filename_complete_2 = "report_sessions_#{friendly}_#{ Time.now.strftime("%F") }.txt"
+  filename_complete_2 = "report_sessions_#{friendly}_#{ Time.now.strftime("%F") }.html"
 
   File.open(filename_complete_2 , "w:UTF-8") do |file|
     file.write(Reports.session_details(clinic_sessions ).gsub("\n", "\r\n"))
@@ -164,22 +170,22 @@ end
 
 
 # generate individual reports
-puts "Generating individual reports"
-provider_names_for_individual_reports = provider_groupings.select {|e| e["GENERATE_REPORT"] == "TRUE"}.collect {|e| e["PROV_NAME"]}
+providers_for_individual_reports = provider_groupings.select {|e| e["GENERATE_REPORT"] == "TRUE"}
+puts "Generating individual reports for #{ providers_for_individual_reports.collect {|e| e["PROV_NAME"]}.join(" / ")}"
 
 # run in groups of 20 to not exceed memory limitations
-provider_names_for_individual_reports.each_slice(20) do |provider_names|
-   selected_entries_for_individual_reports = Analyze.load_if( lambda {|e| provider_names.include?(e["Provider"]) and 
-      e["appt_at"] > DateTime.new(2016, 7, 1) and 
-      e["appt_at"] < DateTime.new(2017, 7, 1)}, last_filename_root).group_by {|e| e["Provider"]}
+providers_for_individual_reports.each_slice(20) do |providers|
+   provider_names = providers.collect {|e| e["PROV_NAME"]}
+   selected_entries_for_individual_reports = Analyze.load_if( lambda {|e| provider_names.include?(e["Provider"])  }, last_filename_root).group_by {|e| e["Provider"]}
+   
+   providers.each do |provider|
+      puts "  Generating a report for individual #{ provider["PROV_NAME"] }"
+      goal_hours_per_session = provider["OUTPATIENT_DIVISION"] == "Residents" ? 3 : 4
       
-   provider_names.each do |provider_name|
-      puts "  Generating a report for individual #{ provider_name }"
-
-      if selected_entries_for_individual_reports[provider_name].any?
-         generate_and_save_sessions_report( provider_name, selected_entries_for_individual_reports[provider_name])
+      if (selected_entries_for_individual_reports[provider["PROV_NAME"]] || []).any?
+         generate_and_save_sessions_report( provider["PROV_NAME"], selected_entries_for_individual_reports[provider["PROV_NAME"]], nil, {goal_hours_per_session: goal_hours_per_session })
       else
-         puts "Warning: #{ provider_name } has no entries"
+         puts "Warning: #{ provider["PROV_NAME"] } has no entries"
       end
    end
 end
@@ -192,15 +198,13 @@ end
 
 provider_groupings.group_by {|e| e["OUTPATIENT_DIVISION"] }.select {|k,v| k and k != ""}.each do |div_name, providers|
    provider_names = providers.collect {|e| e["PROV_NAME"]}
-   
+
    puts "Generating a report for division #{ div_name }"
 
-   selected_entries = Analyze.load_if( lambda {|e| provider_names.include?(e["Provider"]) and 
-      e["appt_at"] > DateTime.new(2016, 7, 1) and 
-      e["appt_at"] < DateTime.new(2017, 7, 1)}, last_filename_root)
+   selected_entries = Analyze.load_if( lambda {|e| provider_names.include?(e["Provider"]) }, last_filename_root)
 
    if selected_entries.any?
-      generate_and_save_sessions_report( div_name, selected_entries)
+      generate_and_save_sessions_report( div_name, selected_entries, nil, {goal_hours_per_session: div_name == "Residents" ? 3 : 4})
    else
       puts "Warning: #{ provider_name } has no entries"
    end

@@ -1,3 +1,6 @@
+# ruby -J-Xmx9000M main_random_forest_100.rb 
+
+
 # this script analyzes EPIC data
 
 # exported from business objects… (PROMIS)
@@ -22,10 +25,11 @@ require 'weka' # requires jruby
 # https://github.com/paulgoetze/weka-jruby/wiki
 
 
+
 # =============================================================================
 # ===============================  parameters  ================================
 input_root = "neurology_provider_visits_with_payer_20170608"
-output_root = "random_forest_classifier"
+output_root = "random_forest_classifier_i100"
 
 # ======================  Step 1 : keep only follow ups  ======================
 last_filename_root = Analyze.resave_with_prior_visit_counts( input_root )
@@ -117,15 +121,23 @@ puts "  Done"
 
 
 puts "Training the classifier"
-classifier = Weka::Classifiers::Trees::RandomForest.new
-# classifier = Weka::Classifiers::Bayes::NaiveBayes.new
-# classifier = Weka::Classifiers::Functions::Logistic.new # 0.2978 RMS error
-# classifier.use_options('-I 200 -K 5')
+classifier = Weka::Classifiers::Trees::RandomForest.new # default I is 100
+
+# i think I is the number of decision trees
+# N =  Number of folds for backfitting (default 0, no backfitting).
+# K = 
+
+# http://weka.sourceforge.net/doc.dev/
+
+classifier.use_options('-I 100')
 # In addition to the parameters listed above for bagging, a key parameter for random forest is the number of attributes to consider in each split point. In Weka this can be controlled by the numFeatures attribute, which by default is set to 0, which selects the value automatically based on a rule of thumb.
+# raise classifier.globalInfo.inspect # RuntimeError: "Class for constructing a forest of random trees.\n\nFor more information see: \n\nLeo Breiman (2001). Random Forests. Machine Learning. 45(1):5-32."
+
+# raise classifier.getOptions.inspect # -I, 100, -K, 0, -S, 1, -num-slots, 1
 
 
-# classifier.use_options('-I 200 -K 5')
-# classifier.use_options('-J-Xmx1000M')
+
+
 classifier.train_with_instances(training_instances)
 puts "  Done"
 
@@ -180,3 +192,18 @@ test_features: #{ test_features.size }
 #    end
 # end
 #
+
+# Ran this on 7/24/2017
+# when i = 100
+
+# Correctly Classified Instances       10652               86.9764 %
+# Incorrectly Classified Instances      1595               13.0236 %
+# Kappa statistic                          0.0701
+# Mean absolute error                      0.1952
+# Root mean squared error                  0.3191
+# Relative absolute error                 88.867  %
+# Root relative squared error             95.9506 %
+# Coverage of cases (0.95 level)          98.4486 %
+# Mean rel. region size (0.95 level)      82.5835 %
+# Total Number of Instances            12247
+# Davids-MacBook-Pro-4:no-show-modeling daviddo$

@@ -81,7 +81,8 @@ module Analyze
    end
    
    
-   def self.load_and_extract_training_and_test_features_from_encounters_file(last_filename_root, training_fraction = 0.8 )
+   def self.extract_training_and_test_features_from_file(last_filename_root, training_fraction = 0.8, **args )
+      args[:only_features_named] ||= nil
       # valid_row_indexes = Array.new
       n_read = 0
       CSV.foreach( "#{last_filename_root}.csv", headers: true ) do |row|
@@ -101,17 +102,18 @@ module Analyze
       puts """  There should be #{valid_row_indexes.size - test_indexes.size} training and #{test_indexes.size} test instances"""
 
       puts "Extracting features for training and test sets"
-      training_features = self.load_features_by_index( last_filename_root, indexes: test_indexes, inverse: true )
-      test_features = self.load_features_by_index( last_filename_root, indexes: test_indexes, inverse: false )
+      training_features = self.load_features_from_file( last_filename_root, indexes: test_indexes, inverse: true, only_features_named: args[:only_features_named] )
+      test_features = self.load_features_from_file( last_filename_root, indexes: test_indexes, inverse: false, only_features_named: args[:only_features_named] )
 
       puts """  Done. Extracted features for #{ training_features.size } training and #{ test_features.size } test instances"""
       [training_features, test_features]
    end
    
    
-   def self.load_features_by_index( input_file_root, **args) # indexes=nil, inverse=false
+   def self.load_features_from_file( input_file_root, **args) # indexes=nil, inverse=false
       args[:indexes] ||= nil
-      args[:inverse] ||= false
+      args[:inverse] ||= false # allow user to specify inverse
+      args[:only_features_named] ||= nil
       
      features = Array.new
      n_read = 0
@@ -123,7 +125,7 @@ module Analyze
            (args[:inverse] == true and !args[:indexes].include?( n_read ))
            item = Hash[row]
            Analyze.parse_timestamps( [item] )
-           Analyze.extract_features( [item] )
+           Analyze.extract_features_from_array( [item], only_features_named: args[:only_features_named] )
            features << item["features"]
         end
         n_read += 1
@@ -142,7 +144,6 @@ module Analyze
          item = Hash[row]
          
          Analyze.parse_timestamps( [item] )
-         # Analyze.extract_features( [item] )
 
          if lambda_par.call(item)
             entries << item
@@ -274,17 +275,72 @@ module Analyze
                end
 
                item = Hash[row]
+               Analyze.parse_timestamps( [item] )
                # raise item.inspect
                if lamda_block.call(item, n_read, n_saved)
                   csv_out << row.collect {|a,b| b} 
                   n_saved += 1
-                  puts "  Saved #{n_saved}" if n_saved % 1000 == 0
+                  puts "  Saved #{n_saved}" if n_saved % 5000 == 0
                end
                n_read += 1
             end
          end
 
          puts "  Saved #{ n_saved } records (of #{n_read}) into #{ output_file}"
+      end
+      "#{ root }_#{ suffix }"
+   end
+ 
+
+   def self.resave_without_columns(root, suffix="mask", **args )
+      require 'digest'
+      
+      args[:omit] ||= []
+      args[:mask] ||= []
+      
+      col = Hash[args[:omit].collect {|e| [e.to_s, :omit]} + args[:mask].collect {|e| [e.to_s, :mask]}]
+      
+      input_file = "#{ root }.csv"
+      output_file = "#{ root }_#{ suffix }.csv"
+
+      if !File.exists?( output_file ) or confirm("  Warning: Overwrite #{ output_file }?")
+         puts "Loading data file #{ input_file }"
+
+         n_saved = 0
+
+         CSV.open("#{ output_file }", "wb") do |csv_out|
+
+            CSV.foreach( input_file, headers: true ) do |row|
+               if n_saved == 0
+                  headers = row.collect {|a,b| a}
+                  csv_out << headers.collect {|h|
+                     case col[h]
+                     when :omit
+                        "#{h} (OMIT)"
+                     when :mask
+                        "#{h} (MASK)"
+                     else
+                        h
+                     end
+                  }
+               end
+               
+               csv_out << row.collect {|a,b| 
+                  case col[a]
+                  when :omit
+                     nil
+                  when :mask
+                     b ? Digest::MD5.hexdigest(b) : b
+                  else
+                     b
+                  end
+               }
+               
+               n_saved += 1
+            end
+         end
+
+         puts "  Saved #{ n_saved } records into #{ output_file}"
       end
       "#{ root }_#{ suffix }"
    end
@@ -373,15 +429,17 @@ module Analyze
    # ==========================================================================
    # =========================  Encounter manipulators  =======================
   
-  def self.extract_features( encounters_all )
+  def self.extract_features_from_array( encounters_all, **args )
     puts "Extracting features" unless encounters_all.size < 2
 
+    args[:only_features_named] ||= nil
+    
     # in order to find specific patient's prior encounters
     encounters_by_mrn = encounters_all.group_by {|e| e["MRN"]}
 
     encounters_all.each {|e| 
   
-      zip = e["Zip Code"] ? e["Zip Code"].to_s.strip[0..4].rjust(5, "0") : "absent"
+      zip = e["Zip Code"] ? e["Zip Code"].to_s.strip[0..4].rjust(5, "0") : nil
       dist = distance_by_zip[ zip ]   # distance from hosp
 
       if ["", nil].include?(e["Benefit Plan"])
@@ -397,21 +455,25 @@ module Analyze
       e["features"] = {
         "dist_km" => Analyze.categorize_continuous_var_by_boundaries(dist, (1..10).collect {|n| 2 ** n} ) || "UNKNOWN",
         "age_decade" => Analyze.categorize_continuous_var_by_boundaries( e["Age at Encounter"].to_i, (10..90).step(10)) || "UNKNOWN",
-        "zip_code" => zip,
+        "zip_code" => zip || "ABSENT",
+        "zip_3" => zip ? zip.slice(0,3) : "ABSENT",
         "gender" => e["Gender"].downcase == "male" ? "male" : "female",
         "appt_made_d_advance" =>  Analyze.categorize_continuous_var_by_boundaries(e["appt_booked_on"] ? (e["appt_at"] - e["appt_booked_on"] ) : nil, (1..8).collect {|n| 2 ** n} ) || "UNKNOWN",
         "dept" => e["Department"].downcase.gsub(" ", "_"),
         "appt_hour" => e["appt_at"].hour.to_s.rjust(2, "0"),
         "appt_type" => e["Visit Type"].downcase,
-        "last_contact" =>  Analyze.categorize_continuous_var_by_boundaries(e["contacted_on"] ? (e["appt_at"] - e["contacted_on"]) : nil, (1..8).collect {|n| 2 ** n} ) || "UNKNOWN",
+        # "last_contact" =>  Analyze.categorize_continuous_var_by_boundaries(e["contacted_on"] ? (e["appt_at"] - e["contacted_on"]) : nil, (1..8).collect {|n| 2 ** n} ) || "UNKNOWN",
         "outcome" => [e].status_no_show.any? ? "no_show" : ([e].status_completed.any? ? "show" : nil),
         "payer" => benefit_plan_category, 
         "prior_show_past_2yr" => e["prior_show_past_2yr"],
         "prior_noshow_past_2yr" => e["prior_noshow_past_2yr"],
         "prior_cancel_past_2yr" => e["prior_cancel_past_2yr"],
         "session" => e["appt_at"].strftime("%a %p"),
+        # "n_diagnoses" => [e["DX1 ICD10"], e["DX2 ICD10"], e["DX3 ICD10"], e["DX4 ICD10"], e["DX5 ICD10"]].count {|e| e != nil and e.strip != ""},
+        # "n_medications" => [e["Order 1 Med ID"], e["Order 2 Med ID"], e["Order 3 Med ID"], e["Order 4 Med ID"], e["Order 5 Med ID"]].count {|e| e != nil and e.strip != ""},
+        "race" => e["Race"],
         "provider" => e["Provider"]
-      }.select {|k,v| v!=nil }
+      }.select {|k,v| v!=nil and ( args[:only_features_named].nil? or args[:only_features_named].include?(k)) }
 
     }
     # puts "  done"

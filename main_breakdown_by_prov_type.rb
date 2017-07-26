@@ -73,7 +73,7 @@ puts " #{ resident_names }"
 puts "========================  non_resident_names  =========================="
 puts " #{ non_resident_names }"
 training_fraction = 0.9
-training_features, test_features = Analyze.load_and_extract_training_and_test_features_from_encounters_file(last_filename_root, training_fraction )
+training_features, test_features = Analyze.extract_training_and_test_features_from_file(last_filename_root, training_fraction )
 
 
 puts "Getting prototype features"

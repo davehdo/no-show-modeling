@@ -25,15 +25,15 @@ require 'weka' # requires jruby
 # =============================================================================
 # ===============================  parameters  ================================
 input_root = "neurology_provider_visits_with_payer_20170608"
-output_root = "odds_ratios_with_race"
+output_root = "odds_ratios"
 
 # ======================  Step 1 : keep only follow ups  ======================
 
 last_filename_root = Analyze.resave_with_prior_visit_counts( input_root )
 
 last_filename_root = Analyze.resave_if( lambda {|item, i, s| 
-   [item].type_office_followup.loc_south_pav.any? and ([item].status_completed.any? or [item].status_no_show.any?)
-}, last_filename_root, "fu_sopa")
+   [item].type_office_followup.loc_south_pav.any? and ([item].status_completed.any? or [item].status_cancelled.any? or [item].status_no_show.any?)
+}, last_filename_root, "fu_sopa_can_ns")
 
 # =========================  Step 2 : eliminate dup  ==========================
 # amongst completed encounters, eliminate the duplicate encounters associated 
@@ -64,14 +64,22 @@ training_features, test_features = Analyze.extract_training_and_test_features_fr
 
 # =============================================================================
 # ========================   assembling into instances   ======================
+# because outcome will be show, no_show, or nil (in case of cancelled visits)
+# we want to convert no_show and nil values to no_show_or_cancelled
+
+test_features.each {|e|
+   e["outcome"] = "no_show_or_can" if e["outcome"] == nil or e["outcome"] == "no_show"
+}
+training_features.each {|e|
+   e["outcome"] = "no_show_or_can" if e["outcome"] == nil or e["outcome"] == "no_show"
+}
+
 
 
 stats = Analyze.train_odds_ratios( training_features )
 
-puts stats
-
 stats = stats.sort_by do |csv_row|
-   k,v = csv_row[:feature_name].split("=")
+   k,v = (csv_row["feature_name"] || "nil=nil").split("=")
    if v[0] == "<"
       "#{k}#{ "0" * 9 }"
    elsif v[0] == ">"
@@ -81,7 +89,7 @@ stats = stats.sort_by do |csv_row|
    end
 end
 
-
+# puts stats
 
 headers = stats.first.keys
 CSV.open("#{ output_root }_coefficients.csv", "wb") do |csv_out|
