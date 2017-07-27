@@ -699,9 +699,15 @@ module Analyze
   #
   #
   #
-   def self.train_odds_ratios( features_array, outcome = "outcome" )
-     
+  
+  # see specs/analyze_spec.rb
+   def self.train_odds_ratios( features_array, **args )
+      # expect the outcome key
+      args[:outcome] ||= "outcome"
+      
       puts "Getting prototype features"
+      
+      # assemble a hash {"feature_name" => ["value 1", "value 2", "value 3"]}
       features_hash = Hash[features_array.collect {|e| e.to_a}
         .flatten(1).uniq.group_by {|k,v| k}.collect do |feature_name, all_values|
            unique_values =  all_values.collect {|k,v| v}.uniq
@@ -709,54 +715,60 @@ module Analyze
            [feature_name, unique_values]
       end]
 
-      raise "There needs to be two types of values for #{ outcome }" unless features_hash[outcome].size == 2
-# features_for_no_show = encounters_no_show.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
-# features_for_show = encounters_completed.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
-      outcome_0 = features_hash[outcome].first
-      n_outcome_0 = features_array.count {|e| e[outcome] == outcome_0 }
-      n_outcome_1 = features_array.size - n_outcome_0
 
-      feature_statistics_array = features_hash.collect {|feature_name, possible_values|
-         possible_values.collect {|val| 
+      # raise "There needs to be two types of values for #{ args[:outcome] }" unless features_hash[args[:outcome]].size == 2
+      possible_outcome_values = features_hash[args[:outcome]]
+      
+      possible_outcome_values.map do |outcome_0|
 
-            n_feature_and_outcome_0 = features_array.count {|e| e[feature_name] == val and e[outcome] == outcome_0 }
-            n_feature_and_outcome_1 = features_array.count {|e| e[feature_name] == val and e[outcome] != outcome_0 }
+         n_outcome_0 = features_array.count {|e| e[args[:outcome]] == outcome_0 }
+         n_outcome_1 = features_array.size - n_outcome_0
 
-            # var_odds_ratio = (var_p_feature_given_show * var_p_feature_given_no_show) +
-            #   (var_p_feature_given_show * p_feature_given_no_show ** 2) +
-            #   (var_p_feature_given_no_show * p_feature_given_show ** 2)
 
-            # per md-calc https://www.medcalc.org/calc/odds_ratio.php
+         feature_statistics_array = features_hash
+            .select {|feature_name, possible_values| feature_name != args[:outcome]}
+            .collect {|feature_name, possible_values|
+               
+            possible_values.collect {|val| 
 
-            a = n_feature_and_outcome_0 # exposed, bad outcome
-            c = n_outcome_0 - n_feature_and_outcome_0 # control, bad outcome
-            b = n_feature_and_outcome_1 # exposed, good outcome
-            d = n_outcome_1 - n_feature_and_outcome_1 # control, good outcome
+               n_feature_and_outcome_0 = features_array.count {|e| e[feature_name] == val and e[args[:outcome]] == outcome_0 }
+               n_feature_and_outcome_1 = features_array.count {|e| e[feature_name] == val and e[args[:outcome]] != outcome_0 }
 
-            odds_ratio = 1.0 * a * d / ( b * c)
-            log_odds_ratio = Math.log( odds_ratio ) # base e
-            se_log_odds_ratio = Math.sqrt( (1.0 / a) + (1.0 / b) + (1.0 / c) + (1.0 / d))
-            # significant = ((odds_ratio_lower > 1.0) or ( odds_ratio_upper < 1.0))
-            {
-               feature_name: "#{feature_name}=#{val}",
-               odds_ratio_outcome_0: odds_ratio,
-               outcome_0: outcome_0,
-               or_95_ci_lower: Math.exp(log_odds_ratio - 1.96 * se_log_odds_ratio ),
-               or_95_ci_upper: Math.exp(log_odds_ratio + 1.96 * se_log_odds_ratio ),
-               n_feature_and_outcome_0: n_feature_and_outcome_0,
-               n_feature_and_outcome_1: n_feature_and_outcome_1,
-               n_outcome_0: n_outcome_0,
-               n_outcome_1: n_outcome_1,
-               log_odds_ratio: log_odds_ratio,
-               se_log_odds_ratio: se_log_odds_ratio,
-              # or_80_ci_lower: Math.exp(log_odds_ratio - 1.28 * se_log_odds_ratio ),
-              # or_80_ci_upper: Math.exp(log_odds_ratio + 1.28 * se_log_odds_ratio ),
-              # significant: significant
+               # var_odds_ratio = (var_p_feature_given_show * var_p_feature_given_no_show) +
+               #   (var_p_feature_given_show * p_feature_given_no_show ** 2) +
+               #   (var_p_feature_given_no_show * p_feature_given_show ** 2)
+
+               # per md-calc https://www.medcalc.org/calc/odds_ratio.php
+
+               a = n_feature_and_outcome_0 # exposed, bad outcome
+               c = n_outcome_0 - n_feature_and_outcome_0 # control, bad outcome
+               b = n_feature_and_outcome_1 # exposed, good outcome
+               d = n_outcome_1 - n_feature_and_outcome_1 # control, good outcome
+
+               odds_ratio = 1.0 * a * d / ( b * c)
+               log_odds_ratio = Math.log( odds_ratio ) # base e
+               se_log_odds_ratio = Math.sqrt( (1.0 / a) + (1.0 / b) + (1.0 / c) + (1.0 / d))
+               # significant = ((odds_ratio_lower > 1.0) or ( odds_ratio_upper < 1.0))
+               {
+                  feature_name: "#{feature_name}=#{val}",
+                  odds_ratio_outcome_0: odds_ratio,
+                  outcome_0: outcome_0,
+                  or_95_ci_lower: Math.exp(log_odds_ratio - 1.96 * se_log_odds_ratio ),
+                  or_95_ci_upper: Math.exp(log_odds_ratio + 1.96 * se_log_odds_ratio ),
+                  n_feature_and_outcome_0: n_feature_and_outcome_0,
+                  n_feature_and_outcome_1: n_feature_and_outcome_1,
+                  n_outcome_0: n_outcome_0,
+                  n_outcome_1: n_outcome_1,
+                  log_odds_ratio: log_odds_ratio,
+                  se_log_odds_ratio: se_log_odds_ratio,
+                 # or_80_ci_lower: Math.exp(log_odds_ratio - 1.28 * se_log_odds_ratio ),
+                 # or_80_ci_upper: Math.exp(log_odds_ratio + 1.28 * se_log_odds_ratio ),
+                 # significant: significant
+               }
             }
-         }
 
-    }.flatten(1).sort_by {|e| e[:feature_name]}
-
+       }.flatten(1).sort_by {|e| e[:feature_name]}
+    end.flatten
   end
   
     
