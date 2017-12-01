@@ -1,16 +1,33 @@
 module Analyze
-   require "./filters.rb"
+   require "../filters.rb"
    require "csv"
    require 'yaml'
      
    # ==========================================================================
    # =========================  Weka-related helpers  =========================
 
+   def self.save_collection( collection, filename )
+     keys = collection.collect {|e| e.keys}.flatten.uniq
+     
+     CSV.open(filename, "w") do |csv|
+       csv << keys
+       collection.each do |row|
+         csv << keys.collect {|k| row[k]}
+       end
+     end
+   end
+   
+   
+   def self.friendly_filename( input_string )
+     input_string.gsub(/[^0-9A-Za-z.\-]+/, '_').downcase
+   end
+   
    def self.get_logistic_coefficients_from_classifier( classifier, training_instances )
       # because the intrinsic method for getting coefficients is not labeled
       # its non-trivial to match it up with the feature its describing
-      # we use a filter to mimic what the training method does, weeding out
-      # non-information-carrying parameters
+      #
+      # we use a filter to simulate what the training method does, weeding out
+      # non-information-carrying parameters e.g. omits male when female is defined
       
       require 'weka'
       import 'weka.filters.unsupervised.attribute.RemoveUseless'
@@ -83,48 +100,45 @@ module Analyze
    
    def self.extract_training_and_test_features_from_file(last_filename_root, training_fraction = 0.8, **args )
       args[:only_features_named] ||= nil
-      # valid_row_indexes = Array.new
+
+      # count the rows
       n_read = 0
-      CSV.foreach( "#{last_filename_root}.csv", headers: true ) do |row|
-         # item = Hash[row]
-         # if [item].status_completed.any? or [item].status_no_show.any?
-         #  valid_row_indexes << n_read
-         # end
-         n_read += 1
-      end
-      
+      CSV.foreach( "#{last_filename_root}.csv", headers: true ) {|row| n_read += 1}
       valid_row_indexes = (0..n_read).to_a
-      
-      puts "  There are #{ valid_row_indexes.size} valid rows in #{ last_filename_root }"
+      puts "  There are #{ valid_row_indexes.size} rows in #{ last_filename_root }"
 
       puts "Separating into training and test sets"
       test_indexes = valid_row_indexes.sample( (valid_row_indexes.size * (1.0 - training_fraction)).round)
       puts """  There should be #{valid_row_indexes.size - test_indexes.size} training and #{test_indexes.size} test instances"""
 
       puts "Extracting features for training and test sets"
-      training_features = self.load_features_from_file( last_filename_root, indexes: test_indexes, inverse: true, only_features_named: args[:only_features_named] )
-      test_features = self.load_features_from_file( last_filename_root, indexes: test_indexes, inverse: false, only_features_named: args[:only_features_named] )
+      training_features = self.line_by_line_extract_features_from_file( last_filename_root, indexes: test_indexes, inverse: true, only_features_named: args[:only_features_named] )
+      test_features = self.line_by_line_extract_features_from_file( last_filename_root, indexes: test_indexes, inverse: false, only_features_named: args[:only_features_named] )
 
       puts """  Done. Extracted features for #{ training_features.size } training and #{ test_features.size } test instances"""
       [training_features, test_features]
    end
    
    
-   def self.load_features_from_file( input_file_root, **args) # indexes=nil, inverse=false
+   def self.line_by_line_extract_features_from_file( input_file_root, **args) # indexes=nil, inverse=false
       args[:indexes] ||= nil
-      args[:inverse] ||= false # allow user to specify inverse
+      args[:inverse] ||= false # allow user to specify inverse, esp when the indexes array is longer than half the entries
       args[:only_features_named] ||= nil
       
      features = Array.new
      n_read = 0
 
-     puts "  Now extracting features"
+     puts "  Now extracting features from each row sequentially in the file"
      CSV.foreach( "#{ input_file_root }.csv", headers: true ) do |row|
         if args[:indexes].nil? or 
            (args[:inverse] == false and args[:indexes].include?( n_read )) or 
            (args[:inverse] == true and !args[:indexes].include?( n_read ))
            item = Hash[row]
-           Analyze.parse_timestamps( [item] )
+           
+           # extractor was meant for multiple rows at once but this is a very 
+           # large data set so we are doing line by line analysis
+           # (loading into memory one at a time)
+
            Analyze.extract_features_from_array( [item], only_features_named: args[:only_features_named] )
            features << item["features"]
         end
@@ -422,9 +436,208 @@ module Analyze
   
   def self.distance_by_zip
       puts "  Loading zip code data" unless @distance_by_zip
-      @distance_by_zip ||= Hash[CSV.read("zipcode_distances_from_19104.csv", {headers: true}).collect {|e| [e["ZIP"], e["DIST_KM"].to_f]}]
+      @distance_by_zip ||= Hash[CSV.read("../zipcode_distances_from_19104.csv", {headers: true}).collect {|e| [e["ZIP"], e["DIST_KM"].to_f]}]
   end
 
+
+  def self.diagnosis_icd10_mappings
+    if @diagnosis_icd10_mappings
+      @diagnosis_icd10_mappings
+    else
+      raise "diagnosis_icd10_mappings is generated when running diagnoses_by_mrn"
+    end
+  end
+    
+  def self.n_diagnosis_codes_in_first_encounter_by_mrn( input_root = "../sources/neurology_provider_visits_with_payer_20170608")
+    if @n_diagnosis_codes_in_first_encounter_by_mrn
+      @n_diagnosis_codes_in_first_encounter_by_mrn
+    else
+      
+      raise "finish implementing this"
+      diagnoses_by_mrn = {}
+      diagnoses_and_icds = []
+
+      puts "Creating a master hash of n_diagnosis_codes_in_first_encounter_by_mrn"
+      n_read = 0
+      CSV.foreach( "#{ input_root }.csv", headers: true ) do |row|
+        if n_read == 0
+           headers = row.collect {|a,b| a}
+        end
+
+        item = Hash[row]
+
+        diagnoses_by_mrn[item["MRN"]] ||= []
+      
+        diagnoses = [item["DX1 ICD10"], item["DX2 ICD10"], item["DX3 ICD10"], item["DX4 ICD10"], item["DX5 ICD10"]]
+          .select {|e| e != nil and e.strip != ""}
+
+        # group if appropriate
+        diagnoses = diagnoses.collect {|icd| 
+          match = icd_by_group.find {|nm, icd_list| icd_list.include?(icd)} # should  return [nm, icd]
+          match ? match[1].join("|") : icd
+        }
+          
+        diagnoses_and_icds = diagnoses_and_icds + [
+          [item["DX1 Name"], item["DX1 ICD10"]],
+          [item["DX2 Name"], item["DX2 ICD10"]],
+          [item["DX3 Name"], item["DX3 ICD10"]],
+          [item["DX4 Name"], item["DX4 ICD10"]],
+          [item["DX5 Name"], item["DX5 ICD10"]]
+        ].select {|dx, icd| dx != nil and dx.strip != ""}
+        
+        
+        diagnoses_by_mrn[item["MRN"]] = (diagnoses_by_mrn[item["MRN"]] + diagnoses).uniq
+        n_read += 1
+      end
+      puts "  done"
+
+
+      # ===================. consolidate the mapping table. ===================
+      @diagnosis_icd10_mappings = icd_by_group.collect {|name, icd_list|
+          {
+            name: name, 
+            name_norm: "dx_#{ self.friendly_filename( name ) }", 
+            icd: v = icd_list.join("|"), 
+            icd_norm: "dx_#{ self.friendly_filename( v ) }", 
+          }
+      } + diagnoses_and_icds.group_by {|dx_name,icd| "#{dx_name}|#{icd}"}
+        .collect {|name_and_icd,entries|
+          k,v = entries[0]
+          { 
+            icd: v, 
+            icd_norm: "dx_#{ self.friendly_filename( v ) }", 
+            name: k, 
+            name_norm: "dx_#{ self.friendly_filename( k ) }", 
+            n_occurances: entries.size
+          }
+      }.sort_by {|r| "#{r[:icd]}|#{ (10000000 - (r[:n_occurances] || 0)).to_s.rjust(8, "0")}"}
+
+      diagnosis_icd10_mappings_filename = "./diagnosis_icd10_mappings.csv"
+      puts "  Writing a table of ICD10 and diagnosis names for reference: #{ diagnosis_icd10_mappings_filename }"
+      
+      self.save_collection( @diagnosis_icd10_mappings,  diagnosis_icd10_mappings_filename)
+
+
+            # =========================  attg/res  ==========================
+      @diagnoses_by_mrn = diagnoses_by_mrn   
+    end  
+  end
+
+    
+  def self.diagnoses_by_mrn( input_root = "../sources/neurology_provider_visits_with_payer_20170608")
+    if @diagnoses_by_mrn
+      @diagnoses_by_mrn
+    else
+      
+      # ==========================  diagnosis group  ==========================
+      # generated from looking at all diagnoses in neurology clinic with prevalance more than 0.5%
+      # anything not in this list of groups should be interpreted as its own entity
+      icd_by_group = {
+        "Brain neoplasm" => ["D49.6", "C71.9"],
+        "Dementia" => ["F03.90", "F03.91"],   
+        "Alzheimer disease" => ["G30.0", "G30.1", "G30.8", "G30.9"],   
+        "Localization-related epilepsy" => ["G40.009",
+          "G40.019",
+          "G40.109",
+          "G40.119",
+          "G40.209",
+          "G40.219"],
+        "Generalized epilepsy" => ["G40.309",
+          "G40.319",
+          "G40.409"],        
+        "Lennox-Gastaut syndrome" => ["G40.812", "G40.814"],
+        "Seizures or seizure disorder" => ["G40.909","G40.919", "G40.802", "R56.9"],        
+        "Juvenile myoclonic epilepsy" => ["G40.B09", "G40.B19"],
+        "Migraine" => ["G43.009", "G43.109", "G43.711", "G43.719", "G43.909"],        
+        "Double vision or other vision complaint" => ["H53.2", "H53.40", "H53.8", "H53.9", "H54.7" ],
+        "Radiculopathy, back pain, or neck pain" => ["M54.12", "M54.16", "M54.17", "M54.2", "M54.5", "M54.81", "M54.9"],        
+        "Gait instability, disorder, imbalance, or ataxia" => ["R26.81", "R26.89", "R26.9", "R27.0"],
+        "Abnormal MRI" => ["R90.89", "R93.0", "R93.8"],        
+        "Osteomalacia or osteoporosis" => ["M83.5", "T42.71XS", "T42.75XA", "T50.901A", "M81.0", "M85.80"],
+        "Encounter for drug monitoring or long-term use of medications" => ["Z51.81", "Z79.899"],
+        "Numbness or sensory disturbance" => ["R20.9", "R20.2", "R20.0"],
+        "Neuropathy" => ["G60.3", "G60.8", "G60.9", "G61.81", "G62.9"],
+        "Pain" => ["R52", "M79.2", "M79.609"],
+        "Weakness or muscle weakness" => ["R53.1", "M62.81"],
+        "Memory loss, cognitive impairment or mild cognitive impairment or cognitive and behavior changes" => ["G31.84", "R41.89", "R41.3", "R46.89"],
+        "Carpal tunnel syndrome" => ["G56.01", "G56.03"], 
+        "Foot drop" => ["M21.372", "M21.371", "M21.379"],
+        "Stroke, TIA, or cerebrovascular disease" => ["I63.9", "I67.9", "G45.9"],
+        "Tremor or essential tremor" => ["R25.1", "G25.0"],
+        "Multiple sclerosis or demyelinating changes" => ["G35", "G37.9"],
+        "Hyperreflexia or spasticity" => ["R29.2", "R25.2"],
+      }
+      
+      
+      
+      diagnoses_by_mrn = {}
+      diagnoses_and_icds = []
+
+      puts "Creating a master hash of diagnoses by MRN"
+      n_read = 0
+      CSV.foreach( "#{ input_root }.csv", headers: true ) do |row|
+        if n_read == 0
+           headers = row.collect {|a,b| a}
+        end
+
+        item = Hash[row]
+
+        diagnoses_by_mrn[item["MRN"]] ||= []
+      
+        diagnoses = [item["DX1 ICD10"], item["DX2 ICD10"], item["DX3 ICD10"], item["DX4 ICD10"], item["DX5 ICD10"]]
+          .select {|e| e != nil and e.strip != ""}
+
+        # group if appropriate
+        diagnoses = diagnoses.collect {|icd| 
+          match = icd_by_group.find {|nm, icd_list| icd_list.include?(icd)} # should  return [nm, icd]
+          match ? match[1].join("|") : icd
+        }
+          
+        diagnoses_and_icds = diagnoses_and_icds + [
+          [item["DX1 Name"], item["DX1 ICD10"]],
+          [item["DX2 Name"], item["DX2 ICD10"]],
+          [item["DX3 Name"], item["DX3 ICD10"]],
+          [item["DX4 Name"], item["DX4 ICD10"]],
+          [item["DX5 Name"], item["DX5 ICD10"]]
+        ].select {|dx, icd| dx != nil and dx.strip != ""}
+        
+        
+        diagnoses_by_mrn[item["MRN"]] = (diagnoses_by_mrn[item["MRN"]] + diagnoses).uniq
+        n_read += 1
+      end
+      puts "  done"
+
+
+      # ===================. consolidate the mapping table. ===================
+      @diagnosis_icd10_mappings = icd_by_group.collect {|name, icd_list|
+          {
+            name: name, 
+            name_norm: "dx_#{ self.friendly_filename( name ) }", 
+            icd: v = icd_list.join("|"), 
+            icd_norm: "dx_#{ self.friendly_filename( v ) }", 
+          }
+      } + diagnoses_and_icds.group_by {|dx_name,icd| "#{dx_name}|#{icd}"}
+        .collect {|name_and_icd,entries|
+          k,v = entries[0]
+          { 
+            icd: v, 
+            icd_norm: "dx_#{ self.friendly_filename( v ) }", 
+            name: k, 
+            name_norm: "dx_#{ self.friendly_filename( k ) }", 
+            n_occurances: entries.size
+          }
+      }.sort_by {|r| "#{r[:icd]}|#{ (10000000 - (r[:n_occurances] || 0)).to_s.rjust(8, "0")}"}
+
+      diagnosis_icd10_mappings_filename = "./diagnosis_icd10_mappings.csv"
+      puts "  Writing a table of ICD10 and diagnosis names for reference: #{ diagnosis_icd10_mappings_filename }"
+      
+      self.save_collection( @diagnosis_icd10_mappings,  diagnosis_icd10_mappings_filename)
+
+
+            # =========================  attg/res  ==========================
+      @diagnoses_by_mrn = diagnoses_by_mrn   
+    end  
+  end
 
    # ==========================================================================
    # =========================  Encounter manipulators  =======================
@@ -434,60 +647,87 @@ module Analyze
 
     args[:only_features_named] ||= nil
     
+    raise "Please specify only_features_named as array which may include 'diagnosis_features' and or 'pt_appt_features" if args[:only_features_named] == nil or args[:only_features_named] == []
+    
     # in order to find specific patient's prior encounters
-    encounters_by_mrn = encounters_all.group_by {|e| e["MRN"]}
+    # encounters_by_mrn = encounters_all.group_by {|e| e["MRN"]}
 
     encounters_all.each {|e| 
-  
-      zip = e["Zip Code"] ? e["Zip Code"].to_s.strip[0..4].rjust(5, "0") : nil
-      dist = distance_by_zip[ zip ]   # distance from hosp
+      # we use either diagnosis_features or regular features because too many features can make the model run extremely slowly
+      if args[:only_features_named].include?( "diagnosis_features" )
+          diagnoses = (diagnoses_by_mrn[e["MRN"]] || []).collect {|e| ["#{ e.strip }", 1]}
+          
+          e["features"] = {
+            "outcome" => [e].status_no_show.any? ? "no_show" : ([e].status_completed.any? ? "show" : nil),
+          }
+          if diagnoses.any?
+            e["features"] = e["features"].merge(Hash[ diagnoses ]) 
+          else
+            e["features"]["no_diagnoses_listed"] = 1;
+          end
+      end    
+      
+      if args[:only_features_named].include?( "pt_appt_features" )
 
-      if ["", nil].include?(e["Benefit Plan"])
-         benefit_plan_category = "BLANK"
-      elsif e["Benefit Plan"] =~ /medicare/i
-         benefit_plan_category = "medicare"
-      elsif e["Benefit Plan"] =~ /medicaid/i
-         benefit_plan_category = "medicaid"
-      else
-         benefit_plan_category = "other"
+          e["appt_at"] = DateTime.strptime(e["Appt. Time"], ' %m/%d/%Y  %H:%M ')
+          # e["checkin_time_obj"] = DateTime.strptime(e["Checkin Time"], ' %m/%d/%Y  %H:%M ') if e["Checkin Time"]
+          e["clinic_session"] = "#{ e["Provider"]}|#{ e["appt_at"].strftime("%F|%p") }"
+          # e["contacted_on"] = DateTime.strptime( e["Contact Date"], " %m/%d/%Y") if e["Contact Date"]
+          # e.g. # 2015-01-19
+          e["appt_booked_on"] = DateTime.strptime(e["Appt. Booked on"], "%F") if e["Appt. Booked on"]
+        
+          zip = e["Zip Code"] ? e["Zip Code"].to_s.strip[0..4].rjust(5, "0") : nil
+          dist = distance_by_zip[ zip ]   # distance from hosp
+
+          if ["", nil].include?(e["Benefit Plan"])
+             benefit_plan_category = "BLANK"
+          elsif e["Benefit Plan"] =~ /medicare/i
+             benefit_plan_category = "medicare"
+          elsif e["Benefit Plan"] =~ /medicaid/i
+             benefit_plan_category = "medicaid"
+          else
+             benefit_plan_category = "other"
+          end
+      
+          # raise "Data set is missing constructed column prior_show_past_2yr. Did you run script to add columns for counts?" unless e["prior_show_past_2yr"]
+          e["features"] = {
+            "dist_km" => Analyze.categorize_continuous_var_by_boundaries(dist, (1..10).collect {|n| 2 ** n} ) || "UNKNOWN",
+            "age_decade" => Analyze.categorize_continuous_var_by_boundaries( e["Age at Encounter"].to_i, (10..90).step(10)) || "UNKNOWN",
+            # "zip_code" => zip || "ABSENT",
+            # "zip_3" => zip ? zip.slice(0,3) : "ABSENT",
+            "gender" => e["Gender"].downcase == "male" ? "male" : "female",
+            "appt_made_d_advance" =>  Analyze.categorize_continuous_var_by_boundaries(e["appt_booked_on"] ? (e["appt_at"] - e["appt_booked_on"] ) : nil, (1..8).collect {|n| 2 ** n} ) || "UNKNOWN",
+            "dept" => e["Department"].downcase.gsub(" ", "_"),
+            "appt_hour" => e["appt_at"].hour.to_s.rjust(2, "0"),
+            "appt_type" => e["Visit Type"].downcase,
+            # "last_contact" =>  Analyze.categorize_continuous_var_by_boundaries(e["contacted_on"] ? (e["appt_at"] - e["contacted_on"]) : nil, (1..8).collect {|n| 2 ** n} ) || "UNKNOWN",
+            "outcome" => [e].status_no_show.any? ? "no_show" : ([e].status_completed.any? ? "show" : nil),
+            "payer" => benefit_plan_category, 
+            "prior_show_past_2yr" => e["prior_show_past_2yr"],
+            "prior_noshow_past_2yr" => e["prior_noshow_past_2yr"],
+            "prior_cancel_past_2yr" => e["prior_cancel_past_2yr"],
+            "session" => e["appt_at"].strftime("%a %p"),
+            # "n_diagnoses" => [e["DX1 ICD10"], e["DX2 ICD10"], e["DX3 ICD10"], e["DX4 ICD10"], e["DX5 ICD10"]].count {|e| e != nil and e.strip != ""},
+            # "n_medications" => [e["Order 1 Med ID"], e["Order 2 Med ID"], e["Order 3 Med ID"], e["Order 4 Med ID"], e["Order 5 Med ID"]].count {|e| e != nil and e.strip != ""},
+            "race" => e["Race"],
+            # "provider" => e["Provider"]
+          }.select {|k,v| v!=nil and ( args[:only_features_named].nil? or args[:only_features_named].include?(k)) }
       end
-         
-      e["features"] = {
-        "dist_km" => Analyze.categorize_continuous_var_by_boundaries(dist, (1..10).collect {|n| 2 ** n} ) || "UNKNOWN",
-        "age_decade" => Analyze.categorize_continuous_var_by_boundaries( e["Age at Encounter"].to_i, (10..90).step(10)) || "UNKNOWN",
-        "zip_code" => zip || "ABSENT",
-        "zip_3" => zip ? zip.slice(0,3) : "ABSENT",
-        "gender" => e["Gender"].downcase == "male" ? "male" : "female",
-        "appt_made_d_advance" =>  Analyze.categorize_continuous_var_by_boundaries(e["appt_booked_on"] ? (e["appt_at"] - e["appt_booked_on"] ) : nil, (1..8).collect {|n| 2 ** n} ) || "UNKNOWN",
-        "dept" => e["Department"].downcase.gsub(" ", "_"),
-        "appt_hour" => e["appt_at"].hour.to_s.rjust(2, "0"),
-        "appt_type" => e["Visit Type"].downcase,
-        # "last_contact" =>  Analyze.categorize_continuous_var_by_boundaries(e["contacted_on"] ? (e["appt_at"] - e["contacted_on"]) : nil, (1..8).collect {|n| 2 ** n} ) || "UNKNOWN",
-        "outcome" => [e].status_no_show.any? ? "no_show" : ([e].status_completed.any? ? "show" : nil),
-        "payer" => benefit_plan_category, 
-        "prior_show_past_2yr" => e["prior_show_past_2yr"],
-        "prior_noshow_past_2yr" => e["prior_noshow_past_2yr"],
-        "prior_cancel_past_2yr" => e["prior_cancel_past_2yr"],
-        "session" => e["appt_at"].strftime("%a %p"),
-        # "n_diagnoses" => [e["DX1 ICD10"], e["DX2 ICD10"], e["DX3 ICD10"], e["DX4 ICD10"], e["DX5 ICD10"]].count {|e| e != nil and e.strip != ""},
-        # "n_medications" => [e["Order 1 Med ID"], e["Order 2 Med ID"], e["Order 3 Med ID"], e["Order 4 Med ID"], e["Order 5 Med ID"]].count {|e| e != nil and e.strip != ""},
-        "race" => e["Race"],
-        "provider" => e["Provider"]
-      }.select {|k,v| v!=nil and ( args[:only_features_named].nil? or args[:only_features_named].include?(k)) }
-
     }
     # puts "  done"
     encounters_all
   end
   
   
+    
+  
   def self.parse_timestamps( encounters_all, timeslot_size = 15 )
     puts "Parsing timestamps" unless encounters_all.size < 2
     encounters_all.each {|e| 
       e["appt_at"] = DateTime.strptime(e["Appt. Time"], ' %m/%d/%Y  %H:%M ')
-      e["checkin_time_obj"] = DateTime.strptime(e["Checkin Time"], ' %m/%d/%Y  %H:%M ') if e["Checkin Time"]
+      # e["checkin_time_obj"] = DateTime.strptime(e["Checkin Time"], ' %m/%d/%Y  %H:%M ') if e["Checkin Time"]
       e["clinic_session"] = "#{ e["Provider"]}|#{ e["appt_at"].strftime("%F|%p") }"
-      e["contacted_on"] = DateTime.strptime( e["Contact Date"], " %m/%d/%Y") if e["Contact Date"]
+      # e["contacted_on"] = DateTime.strptime( e["Contact Date"], " %m/%d/%Y") if e["Contact Date"]
       # e.g. # 2015-01-19
       e["appt_booked_on"] = DateTime.strptime(e["Appt. Booked on"], "%F") if e["Appt. Booked on"]
       #   e["appt_booked_on"] = nil if e["appt_booked_on"] > e["appt_at"]
@@ -598,6 +838,7 @@ module Analyze
   
   
   def self.assign_odds_ratios( encounters_all, log_odds_ratios_by_feature, outcome_stored_as)  
+     raise "see train_odds_ratios"
     puts "\nAssigning probabilities to encounters based on their features (#{ log_odds_ratios_by_feature.size } are meaningful)"
 
     pretest_prob = 1.0 * encounters_all.status_no_show.size / ( encounters_all.status_no_show.size + encounters_all.status_completed.size)
@@ -648,95 +889,84 @@ module Analyze
   end
 
 
-  # def self.train_multiple_regression( encounters_no_show, encounters_completed )
-  #   puts "Running multiple regression "
-  #   features_for_no_show = encounters_no_show.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
-  #   features_for_show = encounters_completed.collect {|e| e["features"].to_a}.flatten(1).group_by {|k,v| k}
-  #
-  #   n_show = encounters_completed.size
-  #   n_no_show = encounters_no_show.size
-  #
-  #   unique_feature_names = (features_for_show.keys + features_for_no_show.keys).uniq
-  #
-  #   # multiple regression example
-  #   ds = {}
-  #
-  #   puts "  Assembling arrays for #{ unique_feature_names.size } predictors"
-  #   unique_feature_names.each do |feature_name|
-  #     arr = (encounters_no_show + encounters_completed ).collect {|e| e["features"][feature_name] || 0}
-  #
-  #     # we keep only the features that have decent predictive value,
-  #     # as calcuated by an odds ratio.
-  #     # This helps reduce the computational requirement for training
-  #     # and reduces that chance that "Regressors are linearly dependent"
-  #     n_feature_and_show = (features_for_show[ feature_name ] || []).count {|k,v| v != 0}
-  #     n_feature_and_no_show = (features_for_no_show[ feature_name ] || []).count {|k,v| v != 0}
-  #
-  #     a = n_feature_and_no_show # exposed, bad outcome
-  #     c = n_no_show - n_feature_and_no_show # control, bad outcome
-  #     b = n_feature_and_show # exposed, good outcome
-  #     d = n_show - n_feature_and_show # control, good outcome
-  #
-  #     odds_ratio = 1.0 * a * d / ( b * c)
-  #
-  #     log_odds_ratio = Math.log( odds_ratio ) # base e
-  #     se_log_odds_ratio = Math.sqrt( (1.0 / a) + (1.0 / b) + (1.0 / c) + (1.0 / d))
-  #
-  #     # 1.28 is 80%     1.65 is 90%   1.96 is 95%
-  #     lower = Math.exp(log_odds_ratio - 1.65 * se_log_odds_ratio )
-  #     upper = Math.exp(log_odds_ratio + 1.65 * se_log_odds_ratio )
-  #
-  #     ds[feature_name] = arr.to_vector(:scale) if lower > 1.0 or upper < 1.0
-  #   end
-  #
-  #   puts "  Assembling array of training outcomes"
-  #   # we use 10 and -10 as log odds
-  #   ds["no-show"] = (encounters_no_show.collect {2.0} + encounters_completed.collect {-2.0}).to_vector(:scale)
-  #
-  #   puts "  Training the model"
-  #   lr=Statsample::Regression.multiple(ds.to_dataset,'no-show')
-  # end
-  #
-  #
-  #
+  def self.filter_by_prevalence( features_array, min_prevalence = 0.005 )
+    minimum_n ||= (min_prevalence * features_array.size).floor
+    
+    
+    features_names_with_enough = features_array.collect {|e| e.to_a}
+      .flatten(1).group_by {|k,v| k}.collect do |feature_name, all_values|
+         # puts "#{ feature_name } : #{ all_values.size }"
+         if all_values.size >= minimum_n
+            feature_name
+         else
+            puts "  filter_by_prevalence: Feature\t#{ feature_name }\tomitted because does not meet minumum n of #{ minimum_n }\t#{ all_values.size }"
+            nil
+         end
+    end.compact 
+    
+    features_array.collect {|e| e.select {|k,v| features_names_with_enough.include?(k)}}
+  end
   
-  # see specs/analyze_spec.rb
+  
+  # see specs/analyze_spec.rb 
+  # univariate
    def self.train_odds_ratios( features_array, **args )
       # expect the outcome key
       args[:outcome] ||= "outcome"
       
-      puts "Getting prototype features"
+      # only analyze features with a certain prevalance
+      args[:min_prevalence] ||= 0.005
+      args[:min_posttest_prob] ||= 0.0
+      
+      args[:filter_significant ] ||= false
+      
+      minimum_n ||= (args[:min_prevalence] * features_array.size).floor
+      
+      puts "Train odds ratios"
+      puts "  Getting prototype features and values"
       
       # assemble a hash {"feature_name" => ["value 1", "value 2", "value 3"]}
       features_hash = Hash[features_array.collect {|e| e.to_a}
-        .flatten(1).uniq.group_by {|k,v| k}.collect do |feature_name, all_values|
-           unique_values =  all_values.collect {|k,v| v}.uniq
+        .flatten(1).group_by {|k,v| k}.collect do |feature_name, all_values|
+           # puts "#{ feature_name } : #{ all_values.size }"
+           if all_values.size >= minimum_n or feature_name == args[:outcome]
+              unique_values =  all_values.collect {|k,v| v}.uniq
+              [feature_name, unique_values]
+           else
+              puts "  Odds ratio calculator: Feature\t#{ feature_name }\tomitted because does not meet minumum n of #{ minimum_n }\t#{ all_values.size }"
+              nil
+           end
+      end.compact ]
 
-           [feature_name, unique_values]
-      end]
-
-
+      raise "  Err: There are no features meeting minimum threshold" if features_hash.size == 0
+      
       # raise "There needs to be two types of values for #{ args[:outcome] }" unless features_hash[args[:outcome]].size == 2
       possible_outcome_values = features_hash[args[:outcome]]
       
+      puts "  Calculating for #{ possible_outcome_values.size} possible outcome values and the following features: #{ features_hash.keys }"
+      
+      # go through each outcome
       possible_outcome_values.map do |outcome_0|
+         puts "    Calculating for #{args[:outcome]}=#{ outcome_0 }"
 
-         n_outcome_0 = features_array.count {|e| e[args[:outcome]] == outcome_0 }
-         n_outcome_1 = features_array.size - n_outcome_0
-
-
-         feature_statistics_array = features_hash
-            .select {|feature_name, possible_values| feature_name != args[:outcome]}
-            .collect {|feature_name, possible_values|
-               
+         entries_with_given_outcome = features_array.select {|e| e[args[:outcome]] == outcome_0 }
+         entries_without_given_outcome = features_array - entries_with_given_outcome
+         
+         n_outcome_0 = entries_with_given_outcome.size
+         n_outcome_1 = entries_without_given_outcome.size
+         
+         # go through each feature key
+         features_hash.select {|feat_name, v| feat_name != args[:outcome]}.collect {|feature_name, possible_values|
+            
+            entries_with_given_outcome_by_feature_value = entries_with_given_outcome.collect {|e| e[feature_name] }.group_by {|e| e }
+            entries_without_given_outcome_by_feature_value = entries_without_given_outcome.collect {|e| e[feature_name] }.group_by {|e| e }
+            
+            
+            # go through each possible feature value
             possible_values.collect {|val| 
 
-               n_feature_and_outcome_0 = features_array.count {|e| e[feature_name] == val and e[args[:outcome]] == outcome_0 }
-               n_feature_and_outcome_1 = features_array.count {|e| e[feature_name] == val and e[args[:outcome]] != outcome_0 }
-
-               # var_odds_ratio = (var_p_feature_given_show * var_p_feature_given_no_show) +
-               #   (var_p_feature_given_show * p_feature_given_no_show ** 2) +
-               #   (var_p_feature_given_no_show * p_feature_given_show ** 2)
+               n_feature_and_outcome_0 = (entries_with_given_outcome_by_feature_value[ val ] || []).size
+               n_feature_and_outcome_1 = (entries_without_given_outcome_by_feature_value[ val ] || []).size
 
                # per md-calc https://www.medcalc.org/calc/odds_ratio.php
 
@@ -748,26 +978,36 @@ module Analyze
                odds_ratio = 1.0 * a * d / ( b * c)
                log_odds_ratio = Math.log( odds_ratio ) # base e
                se_log_odds_ratio = Math.sqrt( (1.0 / a) + (1.0 / b) + (1.0 / c) + (1.0 / d))
-               # significant = ((odds_ratio_lower > 1.0) or ( odds_ratio_upper < 1.0))
+               # significant = (Math.exp(log_odds_ratio - 1.96 * se_log_odds_ratio )  > 1.0) or ( Math.exp(log_odds_ratio + 1.96 * se_log_odds_ratio < 1.0))
+               odds_outcome_0_given_feature  = n_outcome_0 / n_outcome_1 * odds_ratio
+               or_95_ci_lower = Math.exp(log_odds_ratio - 1.96 * se_log_odds_ratio )
+               or_95_ci_upper = Math.exp(log_odds_ratio + 1.96 * se_log_odds_ratio )
+               
+               
                {
-                  feature_name: "#{feature_name}=#{val}",
+                   feature_name_value: "#{feature_name}=#{val}",
+                   feature_name: feature_name,
+                   feature_value: val,
                   odds_ratio_outcome_0: odds_ratio,
+                  odds_ratio_text: "#{ odds_ratio.round(2) } (#{or_95_ci_lower.round(2)}-#{or_95_ci_upper.round(2)})",
                   outcome_0: outcome_0,
-                  or_95_ci_lower: Math.exp(log_odds_ratio - 1.96 * se_log_odds_ratio ),
-                  or_95_ci_upper: Math.exp(log_odds_ratio + 1.96 * se_log_odds_ratio ),
+                  or_95_ci_lower: or_95_ci_lower,
+                  or_95_ci_upper: or_95_ci_upper,
                   n_feature_and_outcome_0: n_feature_and_outcome_0,
                   n_feature_and_outcome_1: n_feature_and_outcome_1,
                   n_outcome_0: n_outcome_0,
                   n_outcome_1: n_outcome_1,
                   log_odds_ratio: log_odds_ratio,
                   se_log_odds_ratio: se_log_odds_ratio,
+                  prob_outcome_0_given_feature: odds_outcome_0_given_feature / (1 + odds_outcome_0_given_feature),
                  # or_80_ci_lower: Math.exp(log_odds_ratio - 1.28 * se_log_odds_ratio ),
                  # or_80_ci_upper: Math.exp(log_odds_ratio + 1.28 * se_log_odds_ratio ),
-                 # significant: significant
+                 # significant: significant,
                }
-            }
+            } # /each feature value
 
-       }.flatten(1).sort_by {|e| e[:feature_name]}
+       }.flatten.select {|e| !args[:filter_significant ] or e[:or_95_ci_lower] > 1 or e[:or_95_ci_upper] < 1}
+           .select {|e| e[:prob_outcome_0_given_feature] >= args[:min_posttest_prob] }
     end.flatten
   end
   
